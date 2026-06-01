@@ -47,11 +47,44 @@ python main.py --mode eval --policy random --episodes 3
 python main.py --mode eval --policy dla --episodes 3
 python main.py --mode eval --policy dla --episodes 1 --rendering
 
+# prepare reusable PKL scenarios for faster repeated training/eval
+python main.py --prepare-pkls --prepare-only --pkl-dir pkl_envs --pkl-count 64 --pkl-seed-start 1000
+
 # train BC and evaluate from checkpoint
 python main.py --mode train --policy bc --episodes 2 --train-epochs 1
 python main.py --mode eval --policy bc --episodes 2
 
+# same with PKL-backed environments + debug checks
+python main.py --mode train --policy bc --env-source pkl --pkl-dir pkl_envs --episodes 3 --train-epochs 2 --debug-checks
+
 # train MAPPO and evaluate from checkpoint
 python main.py --mode train --policy mappo --episodes 2 --train-epochs 1
 python main.py --mode eval --policy mappo --episodes 2
+
+# MAPPO diagnostics from legacy doc guidance (entropy / approx_kl)
+python main.py --mode train --policy mappo --env-source pkl --pkl-dir pkl_envs --episodes 3 --train-epochs 2 --debug-checks
+
+# tensorboard (runs include mode/policy/params in folder name)
+tensorboard --logdir runs
+
+# extract KPI hints from legacy PDF
+python tools/pdf_kpi_digest.py \
+  --pdf ../flatland_minimal_project_NOT_WORKING_TRANSFORM/2026_05_FLATLAND_MARL_EXPERIMENT.pdf \
+  --out-md runs/legacy_kpi_digest.md \
+  --out-txt runs/legacy_kpi_raw.txt
 ```
+
+Each run creates a folder like:
+
+`runs/YYYYMMDD_HHMMSS_<mode>_<policy>_a<n_agents>_w<width>h<height>_c<n_cities>_s<seed>`
+
+Logged metrics include:
+
+- eval: `done_rate`, `episode_len`, `total_reward`, `deadlock_rate`
+- eval summary: `success_rate`, `avg_steps`, `avg_reward`, `avg_deadlock_rate`
+- bc: `loss`, `accuracy`
+- mappo/ppo: `p_loss`, `v_loss`, `entropy`, `approx_kl`
+
+The legacy PDF in `../flatland_minimal_project_NOT_WORKING_TRANSFORM/`
+is treated as guidance for diagnostics and KPI tracking. The utility script above
+creates a searchable digest so KPI terms and baseline claims are visible in one place.

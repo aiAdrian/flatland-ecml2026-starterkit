@@ -39,5 +39,9 @@ class DLAPolicy(RailEnvPolicy[Any, Any, RailEnvActions]):
     def act_many(self, handles: List[int], observations: List[Any], **kwargs) -> Dict[int, RailEnvActions]:
         return self._delegate.act_many(handles, observations, **kwargs)
 
+    def reset_env(self, env) -> None:
+        if hasattr(self._delegate, "reset"):
+            self._delegate.reset(env)
+
     def act(self, observation: Any, **kwargs) -> RailEnvActions:
         raise NotImplementedError("DLAPolicy is intended for act_many(handles, observations).")

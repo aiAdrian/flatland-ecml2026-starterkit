@@ -8,11 +8,11 @@ import torch.nn.functional as F
 from policy.dla.observation import DLAFullEnvObservation
 from policy.dla.policy import DLAPolicy
 from utils.action_utils import normalize_actions
-from utils.env_factory import SolverConfig, build_env
+from utils.env_factory import SolverConfig, build_env, build_env_from_pkl, list_pkl_dataset
 from utils.model_utils import DiscretePolicyNet, split_obs_and_mask
 
 
-def train_bc(args, checkpoint_path: Path) -> Path:
+def train_bc(args, checkpoint_path: Path, tb_logger=None) -> Path:
     obs_builder = args.obs_builder
     cfg = SolverConfig(
         width=args.width,
@@ -23,9 +23,14 @@ def train_bc(args, checkpoint_path: Path) -> Path:
         max_rail_pairs_in_city=args.max_rail_pairs_in_city,
         seed=args.seed,
     )
-    env = build_env(cfg=cfg, obs_builder=obs_builder)
+    pkl_files = list_pkl_dataset(args.pkl_dir) if args.env_source == "pkl" else []
+    if args.env_source == "pkl" and not pkl_files:
+        raise ValueError(f"No PKL environments found in {args.pkl_dir}. Run with --prepare-pkls first.")
+    if args.env_source == "generated":
+        env = build_env(cfg=cfg, obs_builder=obs_builder)
+    else:
+        env = build_env_from_pkl(pkl_files[0], obs_builder=obs_builder)
 
-    expert = DLAPolicy(seed=args.seed)
     expert_obs_builder = DLAFullEnvObservation()
     del expert_obs_builder  # expert receives env directly in act_many
 
@@ -34,7 +39,18 @@ def train_bc(args, checkpoint_path: Path) -> Path:
 
     for epoch in range(args.train_epochs):
         losses = []
+        correct = 0
+        total = 0
+        rows_without_valid_before_fix = 0
+        labels_forced_valid = 0
         for ep in range(args.episodes):
+            if args.env_source == "pkl":
+                pkl_path = pkl_files[(epoch * max(1, args.episodes) + ep) % len(pkl_files)]
+                env = build_env_from_pkl(pkl_path, obs_builder=obs_builder)
+
+            expert = DLAPolicy(seed=args.seed + epoch * 1000 + ep)
+            expert.reset_env(env)
+
             observations, info = env.reset(random_seed=args.seed + ep + epoch * 1000)
             del info
             done = {"__all__": False}
@@ -60,14 +76,22 @@ def train_bc(args, checkpoint_path: Path) -> Path:
                 mask_t = torch.stack(masks, dim=0)
                 row_has_valid = torch.sum(mask_t > 0.5, dim=1) > 0
                 if torch.any(~row_has_valid):
+                    rows_without_valid_before_fix += int(torch.sum(~row_has_valid).item())
                     mask_t[~row_has_valid] = 1.0
                 label_t = torch.as_tensor(labels, dtype=torch.long)
                 for i in range(mask_t.shape[0]):
+                    if mask_t[i, label_t[i]].item() < 0.5:
+                        labels_forced_valid += 1
                     mask_t[i, label_t[i]] = 1.0
 
                 logits = model(feat_t)
                 logits = logits.masked_fill(mask_t < 0.5, float("-inf"))
                 loss = F.cross_entropy(logits, label_t)
+
+                with torch.no_grad():
+                    pred = torch.argmax(logits, dim=1)
+                    correct += int(torch.sum(pred == label_t).item())
+                    total += int(label_t.numel())
 
                 opt.zero_grad()
                 loss.backward()
@@ -79,7 +103,16 @@ def train_bc(args, checkpoint_path: Path) -> Path:
                 steps += 1
 
         avg_loss = sum(losses) / max(1, len(losses))
-        print(f"[train-bc] epoch={epoch + 1}/{args.train_epochs} avg_loss={avg_loss:.4f}")
+        acc = correct / max(1, total)
+        dbg = ""
+        if getattr(args, "debug_checks", False):
+            dbg = (
+                f" mask_rows_fixed={rows_without_valid_before_fix}"
+                f" labels_forced_valid={labels_forced_valid}"
+            )
+        print(f"[train-bc] epoch={epoch + 1}/{args.train_epochs} avg_loss={avg_loss:.4f} acc={acc:.3f}{dbg}")
+        if tb_logger is not None:
+            tb_logger.log_bc_epoch(epoch + 1, avg_loss=avg_loss, accuracy=acc)
 
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
