@@ -56,12 +56,16 @@ python main.py --mode eval --policy dla --episodes 3
 python main.py --mode eval --policy dla --episodes 1 --rendering
 ```
 
-## Planned Build Order
+## Current Implemented Flow
 
-1. Add BC data collection, training, and checkpoint loading.
-2. Add MAPPO training and checkpoint loading.
-3. Add eval for trained `mappo` (checkpoint loading).
-4. Add observation variants and comparisons.
+1. Baseline eval: `random`, `dla`.
+2. BC training and checkpoint save/load.
+3. MAPPO training and checkpoint save/load.
+4. TensorBoard logging (`eval`, `eval_summary`, `bc`, `ppo`).
+5. PKL-based environment workflow for faster repeated training/eval.
+6. Legacy PDF KPI extraction utility (`tools/pdf_kpi_digest.py`).
+
+See `experimental/flatland_solver/README.md` for the full command matrix.
 
 ## Notes
 
