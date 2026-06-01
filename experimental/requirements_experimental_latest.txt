@@ -1,0 +1,15 @@
+# Experimental standalone stack for Flatland ECML2026 migration
+# Keep aligned with starterkit / container baseline where possible.
+flatland-rl==4.2.5
+
+# RL / MARL core
+torch>=2.0
+numpy>=1.24
+
+# Logging / training UX
+tensorboard>=2.10
+tqdm>=4.64
+
+# Analysis / plotting used by reward shaping and baseline diagnostics
+matplotlib>=3.7
+pandas>=2.0
