@@ -98,6 +98,7 @@ def maybe_prepare_pkl_dataset(args) -> None:
                 f"({per_agent_envs} per agent-count) to {args.pkl_dir} ..."
             )
             print(f"[pkl] Agent counts: {curriculum}")
+            pkl_bar = make_progress_bar(total=len(curriculum), desc="PKL-Gen")
             for idx, n_agents in enumerate(curriculum):
                 sub_cfg = SolverConfig(
                     width=args.width,
@@ -117,6 +118,9 @@ def maybe_prepare_pkl_dataset(args) -> None:
                     overwrite=args.pkl_overwrite,
                 )
                 written_total += len(written)
+                pkl_bar.set_postfix_str(f"agents={n_agents} generated={written_total}/{expected_total}")
+                pkl_bar.update(1)
+            pkl_bar.close()
         else:
             print(f"[pkl] Using {n_cached} cached environments at {args.pkl_dir}")
 

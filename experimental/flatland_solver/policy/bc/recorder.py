@@ -15,7 +15,7 @@ from policy.dla.policy import DLAPolicy
 from utils.action_utils import normalize_actions
 from utils.env_factory import SolverConfig, build_env, build_env_from_pkl, list_pkl_dataset
 from utils.model_utils import infer_obs_dim, split_obs_and_mask
-from utils.progress import format_console_row, make_progress_bar
+from utils.progress import RollingDoneRatio, format_console_row, make_progress_bar
 
 
 def record_dla_dataset(args, dataset_path: Path) -> Path:
@@ -40,9 +40,12 @@ def record_dla_dataset(args, dataset_path: Path) -> Path:
     else:
         env = build_env_from_pkl(pkl_files[0], obs_builder=obs_builder)
 
-    # Probe obs_dim from first env
+    # Probe obs_dim from first env (Flatland reset may return dict or list-like)
     probe_obs, _ = env.reset(random_seed=args.seed)
-    first_obs = probe_obs[0] if 0 in probe_obs else next(iter(probe_obs.values()))
+    if isinstance(probe_obs, dict):
+        first_obs = probe_obs[0] if 0 in probe_obs else next(iter(probe_obs.values()))
+    else:
+        first_obs = probe_obs[0]
     obs_dim = infer_obs_dim(first_obs, default=36)
 
     all_feats: list[torch.Tensor] = []
@@ -50,6 +53,7 @@ def record_dla_dataset(args, dataset_path: Path) -> Path:
     all_labels: list[int] = []
 
     n_episodes = args.episodes
+    rolling_done = RollingDoneRatio(window_size=20)
     bar = make_progress_bar(total=n_episodes, desc="Record[DLA]")
 
     for ep in range(n_episodes):
@@ -86,8 +90,10 @@ def record_dla_dataset(args, dataset_path: Path) -> Path:
             steps += 1
 
         ep_done = sum(a.state == TrainState.DONE for a in env.agents)
-        bar.update(1)
+        rolling_done.update(ep_done, env.get_num_agents())
+        bar.set_secondary(rolling_done.window_ratio(), rolling_done.format_postfix())
         bar.set_postfix_str(f"s={steps} done={ep_done}/{env.get_num_agents()} samples={ep_samples}")
+        bar.update(1)
         print(format_console_row("record", "dla", ep=f"{ep + 1}/{n_episodes}", steps=steps,
                                  done=f"{ep_done}/{env.get_num_agents()}", samples=ep_samples))
 

@@ -171,12 +171,45 @@ def train_mappo(args, checkpoint_path: Path, tb_logger=None) -> Path:
             n_batches += 1
 
             ep_done = sum(a.state == TrainState.DONE for a in env.agents)
+            active_or_blocked = sum(
+                a.state in (TrainState.MOVING, TrainState.STOPPED, TrainState.MALFUNCTION)
+                for a in env.agents
+            )
+            deadlock_rate = active_or_blocked / max(1, env.get_num_agents())
             rolling_done.update(ep_done, env.get_num_agents())
             bar.set_secondary(rolling_done.window_ratio(), rolling_done.format_postfix())
             ep_reward = float(sum(step_rewards))
-            bar.set_postfix_str(f"s={steps} rew={ep_reward:+.2f}")
+            bar.set_postfix_str(
+                f"s={steps} rew={ep_reward:+.2f} ent={float(entropy.item()):.4f} kl={float(approx_kl.item()):.5f}"
+            )
             bar.update(1)
-            print(format_console_row("train", "mappo", epoch=f"{epoch + 1}/{args.train_epochs}", ep=f"{ep + 1}/{args.episodes}", steps=steps, done=f"{ep_done}/{env.get_num_agents()}", rew=ep_reward, p_loss=float(policy_loss.item()), v_loss=float(value_loss.item())))
+            print(
+                format_console_row(
+                    "train",
+                    "mappo",
+                    epoch=f"{epoch + 1}/{args.train_epochs}",
+                    ep=f"{ep + 1}/{args.episodes}",
+                    steps=steps,
+                    done=f"{ep_done}/{env.get_num_agents()}",
+                    rew=ep_reward,
+                    p_loss=float(policy_loss.item()),
+                    v_loss=float(value_loss.item()),
+                    entropy=float(entropy.item()),
+                    approx_kl=float(approx_kl.item()),
+                )
+            )
+            if tb_logger is not None:
+                ep_idx = epoch * max(1, args.episodes) + ep + 1
+                tb_logger.log_mappo_episode(
+                    episode_idx=ep_idx,
+                    done_rate=ep_done / max(1, env.get_num_agents()),
+                    episode_len=float(steps),
+                    total_reward=ep_reward,
+                    n_agents=env.get_num_agents(),
+                    deadlock_rate=deadlock_rate,
+                    policy_loss=float(policy_loss.item()),
+                    value_loss=float(value_loss.item()),
+                )
 
         if n_batches == 0:
             print(format_console_row("epoch", "mappo", epoch=f"{epoch + 1}/{args.train_epochs}", status="no_batches"))
@@ -185,10 +218,17 @@ def train_mappo(args, checkpoint_path: Path, tb_logger=None) -> Path:
             avg_v = epoch_value_loss / n_batches
             avg_entropy = epoch_entropy / n_batches
             avg_kl = epoch_approx_kl / n_batches
-            dbg = ""
-            if getattr(args, "debug_checks", False):
-                dbg = f" entropy={avg_entropy:.4f} approx_kl={avg_kl:.5f}"
-            print(format_console_row("epoch", "mappo", epoch=f"{epoch + 1}/{args.train_epochs}", policy_loss=avg_p, value_loss=avg_v, debug=dbg.strip() if dbg else "-"))
+            print(
+                format_console_row(
+                    "epoch",
+                    "mappo",
+                    epoch=f"{epoch + 1}/{args.train_epochs}",
+                    policy_loss=avg_p,
+                    value_loss=avg_v,
+                    entropy=avg_entropy,
+                    approx_kl=avg_kl,
+                )
+            )
             if tb_logger is not None:
                 tb_logger.log_mappo_epoch(
                     epoch + 1,
@@ -218,6 +258,15 @@ def train_mappo(args, checkpoint_path: Path, tb_logger=None) -> Path:
     action_hist_text = ", ".join(
         f"a{idx}={int(count)}" for idx, count in enumerate(total_action_hist.tolist())
     )
+    if tb_logger is not None:
+        tb_logger.log_mappo_summary(
+            obs_dim=obs_dim,
+            feature_mean=feature_mean,
+            feature_std=feature_std,
+            mask_active_ratio=mask_active_ratio,
+            actions_total=action_total,
+            action_hist=[int(x) for x in total_action_hist.tolist()],
+        )
     print(format_console_row("summary", "mappo", obs_dim=obs_dim, feature_mean=feature_mean, feature_std=feature_std, mask_active_ratio=mask_active_ratio, actions_total=action_total, hist=action_hist_text))
     print(format_console_row("checkpoint", "mappo", path=str(checkpoint_path)))
     return checkpoint_path

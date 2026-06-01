@@ -79,6 +79,45 @@ class TBLogger:
         if approx_kl is not None:
             self.writer.add_scalar("ppo/approx_kl", float(approx_kl), epoch_idx)
 
+    def log_mappo_episode(
+        self,
+        episode_idx: int,
+        done_rate: float,
+        episode_len: float,
+        total_reward: float,
+        n_agents: int,
+        deadlock_rate: Optional[float] = None,
+        policy_loss: Optional[float] = None,
+        value_loss: Optional[float] = None,
+    ):
+        self.writer.add_scalar("ppo_episode/done_rate", float(done_rate), episode_idx)
+        self.writer.add_scalar("ppo_episode/episode_len", float(episode_len), episode_idx)
+        self.writer.add_scalar("ppo_episode/total_reward", float(total_reward), episode_idx)
+        self.writer.add_scalar("ppo_episode/n_agents", float(n_agents), episode_idx)
+        if deadlock_rate is not None:
+            self.writer.add_scalar("ppo_episode/deadlock_rate", float(deadlock_rate), episode_idx)
+        if policy_loss is not None:
+            self.writer.add_scalar("ppo_episode/p_loss", float(policy_loss), episode_idx)
+        if value_loss is not None:
+            self.writer.add_scalar("ppo_episode/v_loss", float(value_loss), episode_idx)
+
+    def log_mappo_summary(
+        self,
+        obs_dim: int,
+        feature_mean: float,
+        feature_std: float,
+        mask_active_ratio: float,
+        actions_total: int,
+        action_hist: list[int],
+    ):
+        self.writer.add_scalar("ppo_summary/obs_dim", float(obs_dim), 0)
+        self.writer.add_scalar("ppo_summary/feature_mean", float(feature_mean), 0)
+        self.writer.add_scalar("ppo_summary/feature_std", float(feature_std), 0)
+        self.writer.add_scalar("ppo_summary/mask_active_ratio", float(mask_active_ratio), 0)
+        self.writer.add_scalar("ppo_summary/actions_total", float(actions_total), 0)
+        for i, count in enumerate(action_hist):
+            self.writer.add_scalar(f"ppo_summary/action_hist/a{i}", float(count), 0)
+
     def close(self):
         if self.writer is not None:
             self.writer.flush()
