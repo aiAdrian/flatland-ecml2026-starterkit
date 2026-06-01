@@ -4,10 +4,12 @@ from pathlib import Path
 
 import torch
 from torch.distributions import Categorical
+from flatland.envs.step_utils.states import TrainState
 
 from utils.action_utils import normalize_actions
 from utils.env_factory import SolverConfig, build_env, build_env_from_pkl, list_pkl_dataset
 from utils.model_utils import ActorCriticNet, infer_obs_dim, split_obs_and_mask
+from utils.progress import RollingDoneRatio, format_console_row, format_fixed_metrics, make_progress_bar
 
 
 def _discounted_returns(rewards, gamma: float):
@@ -55,6 +57,12 @@ def train_mappo(args, checkpoint_path: Path, tb_logger=None) -> Path:
             print(f"[train-mappo] warmstart={args.init_checkpoint}")
 
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)
+    total_feature_sum = 0.0
+    total_feature_sq_sum = 0.0
+    total_feature_count = 0
+    total_mask_active = 0.0
+    total_mask_count = 0.0
+    total_action_hist = torch.zeros(5, dtype=torch.long)
 
     for epoch in range(args.train_epochs):
         epoch_policy_loss = 0.0
@@ -62,6 +70,8 @@ def train_mappo(args, checkpoint_path: Path, tb_logger=None) -> Path:
         epoch_entropy = 0.0
         epoch_approx_kl = 0.0
         n_batches = 0
+        rolling_done = RollingDoneRatio(window_size=20)
+        bar = make_progress_bar(total=args.episodes, desc=f"MAPPO[{epoch + 1}/{args.train_epochs}]")
 
         for ep in range(args.episodes):
             if args.env_source == "pkl":
@@ -102,6 +112,12 @@ def train_mappo(args, checkpoint_path: Path, tb_logger=None) -> Path:
                     transition_masks.append(mask.detach())
                     transition_actions.append(action.detach())
                     transition_old_logprobs.append(dist.log_prob(action).detach())
+                    total_feature_sum += float(feat.sum().item())
+                    total_feature_sq_sum += float((feat * feat).sum().item())
+                    total_feature_count += int(feat.numel())
+                    total_mask_active += float((mask > 0.5).sum().item())
+                    total_mask_count += float(mask.numel())
+                    total_action_hist[int(action.item())] += 1
 
                 observations, rewards, done, info = env.step(normalize_actions(actions))
                 del info
@@ -114,6 +130,12 @@ def train_mappo(args, checkpoint_path: Path, tb_logger=None) -> Path:
                 steps += 1
 
             if not step_rewards:
+                bar.set_postfix_str(f"steps={steps} no_steps")
+                bar.update(1)
+                print(
+                    f"[train-mappo][epoch={epoch + 1}/{args.train_epochs}]"
+                    f"[episode={ep + 1}/{args.episodes}] no_steps"
+                )
                 continue
 
             returns = torch.as_tensor(_discounted_returns(step_rewards, args.gamma), dtype=torch.float32)
@@ -148,8 +170,16 @@ def train_mappo(args, checkpoint_path: Path, tb_logger=None) -> Path:
             epoch_approx_kl += float(approx_kl.item())
             n_batches += 1
 
+            ep_done = sum(a.state == TrainState.DONE for a in env.agents)
+            rolling_done.update(ep_done, env.get_num_agents())
+            bar.set_secondary(rolling_done.window_ratio(), rolling_done.format_postfix())
+            ep_reward = float(sum(step_rewards))
+            bar.set_postfix_str(f"s={steps} rew={ep_reward:+.2f}")
+            bar.update(1)
+            print(format_console_row("train", "mappo", epoch=f"{epoch + 1}/{args.train_epochs}", ep=f"{ep + 1}/{args.episodes}", steps=steps, done=f"{ep_done}/{env.get_num_agents()}", rew=ep_reward, p_loss=float(policy_loss.item()), v_loss=float(value_loss.item())))
+
         if n_batches == 0:
-            print(f"[train-mappo] epoch={epoch + 1}/{args.train_epochs} no_batches")
+            print(format_console_row("epoch", "mappo", epoch=f"{epoch + 1}/{args.train_epochs}", status="no_batches"))
         else:
             avg_p = epoch_policy_loss / n_batches
             avg_v = epoch_value_loss / n_batches
@@ -158,10 +188,7 @@ def train_mappo(args, checkpoint_path: Path, tb_logger=None) -> Path:
             dbg = ""
             if getattr(args, "debug_checks", False):
                 dbg = f" entropy={avg_entropy:.4f} approx_kl={avg_kl:.5f}"
-            print(
-                f"[train-mappo] epoch={epoch + 1}/{args.train_epochs} "
-                f"policy_loss={avg_p:.4f} value_loss={avg_v:.4f}{dbg}"
-            )
+            print(format_console_row("epoch", "mappo", epoch=f"{epoch + 1}/{args.train_epochs}", policy_loss=avg_p, value_loss=avg_v, debug=dbg.strip() if dbg else "-"))
             if tb_logger is not None:
                 tb_logger.log_mappo_epoch(
                     epoch + 1,
@@ -170,6 +197,8 @@ def train_mappo(args, checkpoint_path: Path, tb_logger=None) -> Path:
                     entropy=avg_entropy,
                     approx_kl=avg_kl,
                 )
+
+        bar.close()
 
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
@@ -181,5 +210,14 @@ def train_mappo(args, checkpoint_path: Path, tb_logger=None) -> Path:
         },
         checkpoint_path,
     )
-    print(f"[train-mappo] checkpoint={checkpoint_path}")
+    feature_mean = total_feature_sum / max(1, total_feature_count)
+    feature_var = max(0.0, total_feature_sq_sum / max(1, total_feature_count) - feature_mean * feature_mean)
+    feature_std = feature_var ** 0.5
+    mask_active_ratio = total_mask_active / max(1.0, total_mask_count)
+    action_total = int(total_action_hist.sum().item())
+    action_hist_text = ", ".join(
+        f"a{idx}={int(count)}" for idx, count in enumerate(total_action_hist.tolist())
+    )
+    print(format_console_row("summary", "mappo", obs_dim=obs_dim, feature_mean=feature_mean, feature_std=feature_std, mask_active_ratio=mask_active_ratio, actions_total=action_total, hist=action_hist_text))
+    print(format_console_row("checkpoint", "mappo", path=str(checkpoint_path)))
     return checkpoint_path

@@ -7,7 +7,8 @@ from flatland.utils.rendertools import RenderTool
 
 from policy.bc.observation import BCObservationBuilder
 from policy.bc.policy import BCPolicy
-from policy.bc.trainer import train_bc
+from policy.bc.recorder import record_dla_dataset
+from policy.bc.trainer import train_bc, train_bc_from_dataset
 from policy.dla.observation import DLAFullEnvObservation
 from policy.dla.policy import DLAPolicy
 from policy.mappo.observation import MAPPOObservationBuilder
@@ -23,6 +24,7 @@ from utils.env_factory import (
     ensure_pkl_dataset,
     list_pkl_dataset,
 )
+from utils.progress import RollingDoneRatio, format_console_row, format_fixed_metrics, make_progress_bar
 from utils.tb_logger import TBLogger, format_args_text
 
 
@@ -69,6 +71,62 @@ def maybe_prepare_pkl_dataset(args) -> None:
         return
 
     cfg = make_solver_config(args)
+
+    if args.agent_curriculum:
+        curriculum = [int(x) for x in args.agent_curriculum]
+        per_agent_envs = int(args.pkl_num_envs_per_agent)
+        expected_total = per_agent_envs * len(curriculum)
+
+        all_pkls = list_pkl_dataset(args.pkl_dir)
+        n_cached = 0
+        for p in all_pkls:
+            stem = p.stem
+            prefix = stem.split("_")[0]
+            parts = prefix.split("x")
+            if len(parts) != 3 or not all(part.isdigit() for part in parts):
+                continue
+            width = int(parts[0])
+            height = int(parts[1])
+            n_agents = int(parts[2])
+            if width == args.width and height == args.height and n_agents in curriculum:
+                n_cached += 1
+
+        written_total = 0
+        if n_cached < expected_total or args.pkl_overwrite:
+            print(
+                f"[pkl] Generating up to {expected_total} envs "
+                f"({per_agent_envs} per agent-count) to {args.pkl_dir} ..."
+            )
+            print(f"[pkl] Agent counts: {curriculum}")
+            for idx, n_agents in enumerate(curriculum):
+                sub_cfg = SolverConfig(
+                    width=args.width,
+                    height=args.height,
+                    n_agents=n_agents,
+                    n_cities=args.n_cities,
+                    max_rails_between_cities=args.max_rails_between_cities,
+                    max_rail_pairs_in_city=args.max_rail_pairs_in_city,
+                    seed=args.seed,
+                )
+                written = ensure_pkl_dataset(
+                    cfg=sub_cfg,
+                    out_dir=args.pkl_dir,
+                    obs_builder_factory=RandomObservationBuilder,
+                    count=per_agent_envs,
+                    seed_start=args.pkl_seed_start + idx * per_agent_envs,
+                    overwrite=args.pkl_overwrite,
+                )
+                written_total += len(written)
+        else:
+            print(f"[pkl] Using {n_cached} cached environments at {args.pkl_dir}")
+
+        all_pkls_after = list_pkl_dataset(args.pkl_dir)
+        print(
+            f"[pkl] dir={args.pkl_dir} generated={written_total} total={len(all_pkls_after)} "
+            f"expected_total={expected_total}"
+        )
+        return
+
     written = ensure_pkl_dataset(
         cfg=cfg,
         out_dir=args.pkl_dir,
@@ -96,6 +154,9 @@ def run_eval(args) -> EvalStats:
     else:
         env = build_env_from_pkl(pkl_files[0], obs_builder=obs_builder)
 
+    if hasattr(policy, "reset_env"):
+        policy.reset_env(env)
+
     renderer = RenderTool(env, gl="PGL") if args.rendering and env is not None else None
 
     total_done_agents = 0
@@ -103,6 +164,8 @@ def run_eval(args) -> EvalStats:
     total_steps = 0
     total_reward_sum = 0.0
     total_deadlock_rate = 0.0
+    rolling_done = RollingDoneRatio(window_size=20)
+    bar = make_progress_bar(total=args.episodes, desc=f"Eval[{args.policy}]")
 
     for episode in range(args.episodes):
         if args.env_source == "pkl":
@@ -111,6 +174,9 @@ def run_eval(args) -> EvalStats:
             if renderer is not None:
                 renderer.close_window()
             renderer = RenderTool(env, gl="PGL") if args.rendering else None
+
+        if hasattr(policy, "reset_env"):
+            policy.reset_env(env)
 
         observations, info = env.reset(random_seed=args.seed + episode)
         del info
@@ -149,6 +215,8 @@ def run_eval(args) -> EvalStats:
         total_steps += steps
         total_reward_sum += episode_reward
         total_deadlock_rate += deadlock_rate
+        rolling_done.update(episode_done, env.get_num_agents())
+        bar.set_secondary(rolling_done.window_ratio(), rolling_done.format_postfix())
 
         if getattr(args, "tb_logger", None) is not None:
             args.tb_logger.log_eval_episode(
@@ -159,10 +227,15 @@ def run_eval(args) -> EvalStats:
                 deadlock_rate=deadlock_rate,
             )
 
-        print(
-            f"[eval] episode={episode + 1}/{args.episodes} policy={args.policy} "
-            f"steps={steps} done={episode_done}/{env.get_num_agents()}"
-        )
+        bar.set_postfix_str(f"s={steps} r={episode_reward:+.1f}")
+        bar.update(1)
+
+        print(format_console_row("eval", args.policy, ep=f"{episode + 1}/{args.episodes}", steps=steps, done=f"{episode_done}/{env.get_num_agents()}", reward=episode_reward))
+        if args.policy == "dla" and hasattr(policy, "get_debug_stats"):
+            stats = policy.get_debug_stats()
+            print(format_console_row("eval", "dla", calls_total=stats.get("calls_total", 0), calls_episode=stats.get("calls_episode", 0)))
+
+    bar.close()
 
     if renderer is not None:
         renderer.close_window()
@@ -184,10 +257,21 @@ def run_eval(args) -> EvalStats:
     )
 
 
+def run_record(args) -> None:
+    """Phase 1: Run DLA once over all PKLs and save (obs, mask, action) dataset."""
+    args.env_source = args.env_source  # already set
+    record_dla_dataset(args, dataset_path=args.dataset_path)
+
+
 def run_train(args) -> None:
     if args.policy == "bc":
         args.obs_builder = BCObservationBuilder(obs_variant=args.obs_variant)
-        train_bc(args, checkpoint_path=args.bc_checkpoint, tb_logger=getattr(args, "tb_logger", None))
+        if getattr(args, "dataset_path", None) and args.dataset_path.exists():
+            # Offline mode: train from pre-recorded DLA dataset (fast, no DLA overhead)
+            train_bc_from_dataset(args, checkpoint_path=args.bc_checkpoint, tb_logger=getattr(args, "tb_logger", None))
+        else:
+            # Online mode: DLA runs live during training
+            train_bc(args, checkpoint_path=args.bc_checkpoint, tb_logger=getattr(args, "tb_logger", None))
         return
     if args.policy == "mappo":
         args.obs_builder = MAPPOObservationBuilder(obs_variant=args.obs_variant)
@@ -198,7 +282,7 @@ def run_train(args) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Experimental Flatland Solver")
-    parser.add_argument("--mode", choices=["eval", "train"], default="eval")
+    parser.add_argument("--mode", choices=["eval", "train", "record"], default="eval")
     parser.add_argument("--policy", choices=["random", "dla", "bc", "mappo"], default="random")
     parser.add_argument("--episodes", type=int, default=5)
     parser.add_argument("--max-episode-steps", type=int, default=300)
@@ -221,6 +305,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--pkl-count", type=int, default=32)
     parser.add_argument("--pkl-seed-start", type=int, default=1000)
     parser.add_argument("--pkl-overwrite", action="store_true")
+    parser.add_argument("--agent-curriculum", nargs="+", type=int, default=None)
+    parser.add_argument("--pkl-num-envs-per-agent", type=int, default=5)
     parser.add_argument("--prepare-pkls", action="store_true")
     parser.add_argument("--prepare-only", action="store_true")
     parser.add_argument("--debug-checks", action="store_true")
@@ -233,6 +319,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--init-checkpoint", type=Path, default=None)
     parser.add_argument("--bc-checkpoint", type=Path, default=None)
     parser.add_argument("--mappo-checkpoint", type=Path, default=None)
+    parser.add_argument("--dataset-path", type=Path, default=Path("datasets/dla_dataset.pt"),
+                        help="Path for DLA-recorded dataset (--mode record writes, --mode train reads)")
+    parser.add_argument("--batch-size", type=int, default=256,
+                        help="Mini-batch size for offline BC training from dataset")
     return parser
 
 
@@ -269,10 +359,11 @@ def main() -> None:
             stats = run_eval(args)
             success_rate = stats.done_agents / max(1, stats.total_agents)
             avg_steps = stats.total_steps / max(1, stats.episodes)
-            print(
-                f"[summary] episodes={stats.episodes} success_rate={success_rate:.3f} "
-                f"avg_steps={avg_steps:.1f} env_source={args.env_source}"
-            )
+            print(format_console_row("summary", args.policy, episodes=stats.episodes, success_rate=success_rate, avg_steps=avg_steps, env_source=args.env_source))
+            return
+
+        if args.mode == "record":
+            run_record(args)
             return
 
         run_train(args)

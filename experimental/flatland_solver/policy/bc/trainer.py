@@ -4,12 +4,14 @@ from pathlib import Path
 
 import torch
 import torch.nn.functional as F
+from flatland.envs.step_utils.states import TrainState
 
 from policy.dla.observation import DLAFullEnvObservation
 from policy.dla.policy import DLAPolicy
 from utils.action_utils import normalize_actions
 from utils.env_factory import SolverConfig, build_env, build_env_from_pkl, list_pkl_dataset
 from utils.model_utils import DiscretePolicyNet, infer_obs_dim, split_obs_and_mask
+from utils.progress import RollingDoneRatio, format_console_row, format_fixed_metrics, make_progress_bar
 
 
 def train_bc(args, checkpoint_path: Path, tb_logger=None) -> Path:
@@ -50,6 +52,8 @@ def train_bc(args, checkpoint_path: Path, tb_logger=None) -> Path:
         total = 0
         rows_without_valid_before_fix = 0
         labels_forced_valid = 0
+        rolling_done = RollingDoneRatio(window_size=20)
+        bar = make_progress_bar(total=args.episodes, desc=f"BC[{epoch + 1}/{args.train_epochs}]")
         for ep in range(args.episodes):
             if args.env_source == "pkl":
                 pkl_path = pkl_files[(epoch * max(1, args.episodes) + ep) % len(pkl_files)]
@@ -62,6 +66,7 @@ def train_bc(args, checkpoint_path: Path, tb_logger=None) -> Path:
             del info
             done = {"__all__": False}
             steps = 0
+            ep_losses = []
 
             while not done.get("__all__", False) and steps < args.max_episode_steps:
                 handles = list(range(env.get_num_agents()))
@@ -105,9 +110,20 @@ def train_bc(args, checkpoint_path: Path, tb_logger=None) -> Path:
                 opt.step()
 
                 losses.append(float(loss.item()))
+                ep_losses.append(float(loss.item()))
                 observations, rewards, done, info = env.step(norm_expert_actions)
                 del rewards, info
                 steps += 1
+
+            ep_done = sum(a.state == TrainState.DONE for a in env.agents)
+            rolling_done.update(ep_done, env.get_num_agents())
+            bar.set_secondary(rolling_done.window_ratio(), rolling_done.format_postfix())
+            ep_avg_loss = sum(ep_losses) / max(1, len(ep_losses))
+            bar.set_postfix_str(f"s={steps} l={ep_avg_loss:.4f}")
+            bar.update(1)
+            print(format_console_row("train", "bc", epoch=f"{epoch + 1}/{args.train_epochs}", ep=f"{ep + 1}/{args.episodes}", steps=steps, done=f"{ep_done}/{env.get_num_agents()}", avg_loss=ep_avg_loss))
+
+        bar.close()
 
         avg_loss = sum(losses) / max(1, len(losses))
         acc = correct / max(1, total)
@@ -117,7 +133,7 @@ def train_bc(args, checkpoint_path: Path, tb_logger=None) -> Path:
                 f" mask_rows_fixed={rows_without_valid_before_fix}"
                 f" labels_forced_valid={labels_forced_valid}"
             )
-        print(f"[train-bc] epoch={epoch + 1}/{args.train_epochs} avg_loss={avg_loss:.4f} acc={acc:.3f}{dbg}")
+        print(format_console_row("epoch", "bc", epoch=f"{epoch + 1}/{args.train_epochs}", avg_loss=avg_loss, acc=acc, debug=dbg.strip() if dbg else "-"))
         if tb_logger is not None:
             tb_logger.log_bc_epoch(epoch + 1, avg_loss=avg_loss, accuracy=acc)
 
@@ -131,5 +147,90 @@ def train_bc(args, checkpoint_path: Path, tb_logger=None) -> Path:
         },
         checkpoint_path,
     )
-    print(f"[train-bc] checkpoint={checkpoint_path}")
+    print(format_console_row("checkpoint", "bc", path=str(checkpoint_path)))
+    return checkpoint_path
+
+
+def train_bc_from_dataset(args, checkpoint_path: Path, tb_logger=None) -> Path:
+    """Offline BC training: loads a pre-recorded DLA dataset and trains for N epochs.
+
+    Much faster than online BC since DLA runs once during recording, not during training.
+    """
+    dataset_path = args.dataset_path
+    if not dataset_path.exists():
+        raise FileNotFoundError(
+            f"Dataset not found: {dataset_path}. "
+            "Run with --mode record --policy bc first."
+        )
+
+    data = torch.load(dataset_path, map_location="cpu")
+    feats: torch.Tensor = data["feats"]
+    masks: torch.Tensor = data["masks"]
+    labels: torch.Tensor = data["labels"]
+    obs_dim: int = int(data.get("obs_dim", 36))
+    n_samples = feats.shape[0]
+
+    print(format_console_row("dataset", "bc", path=str(dataset_path),
+                             n_samples=n_samples, obs_dim=obs_dim))
+
+    model = DiscretePolicyNet(obs_dim=obs_dim, action_dim=5)
+    opt = torch.optim.Adam(model.parameters(), lr=args.lr)
+
+    batch_size = getattr(args, "batch_size", 256)
+    indices = torch.arange(n_samples)
+
+    for epoch in range(args.train_epochs):
+        # Shuffle each epoch
+        perm = torch.randperm(n_samples)
+        feats_s = feats[perm]
+        masks_s = masks[perm]
+        labels_s = labels[perm]
+
+        losses = []
+        correct = 0
+        total = 0
+        bar = make_progress_bar(
+            total=(n_samples + batch_size - 1) // batch_size,
+            desc=f"BC-offline[{epoch + 1}/{args.train_epochs}]",
+        )
+
+        for start in range(0, n_samples, batch_size):
+            feat_t = feats_s[start:start + batch_size]
+            mask_t = masks_s[start:start + batch_size]
+            label_t = labels_s[start:start + batch_size]
+
+            logits = model(feat_t)
+            logits = logits.masked_fill(mask_t < 0.5, float("-inf"))
+            loss = F.cross_entropy(logits, label_t)
+
+            with torch.no_grad():
+                pred = torch.argmax(logits, dim=1)
+                correct += int(torch.sum(pred == label_t).item())
+                total += int(label_t.numel())
+
+            opt.zero_grad()
+            loss.backward()
+            opt.step()
+            losses.append(float(loss.item()))
+            bar.update(1)
+
+        bar.close()
+        avg_loss = sum(losses) / max(1, len(losses))
+        acc = correct / max(1, total)
+        print(format_console_row("epoch", "bc-offline", epoch=f"{epoch + 1}/{args.train_epochs}",
+                                 avg_loss=avg_loss, acc=acc, n_samples=n_samples))
+        if tb_logger is not None:
+            tb_logger.log_bc_epoch(epoch + 1, avg_loss=avg_loss, accuracy=acc)
+
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(
+        {
+            "model_state": model.state_dict(),
+            "obs_dim": obs_dim,
+            "action_dim": 5,
+            "kind": "bc",
+        },
+        checkpoint_path,
+    )
+    print(format_console_row("checkpoint", "bc", path=str(checkpoint_path)))
     return checkpoint_path

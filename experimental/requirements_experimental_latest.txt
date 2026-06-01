@@ -8,6 +8,8 @@ numpy>=1.24
 
 # Logging / training UX
 tensorboard>=2.10
+# TensorBoard<2.21 imports pkg_resources; keep setuptools compatible.
+setuptools<81
 tqdm>=4.64
 
 # Analysis / plotting used by reward shaping and baseline diagnostics

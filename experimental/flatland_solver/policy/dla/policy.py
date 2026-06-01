@@ -24,6 +24,8 @@ from flatland_baselines.deadlock_avoidance_heuristic.policy.deadlock_avoidance_p
 class DLAPolicy(RailEnvPolicy[Any, Any, RailEnvActions]):
     def __init__(self, seed: int = 42):
         super().__init__()
+        self.calls_total = 0
+        self.calls_episode = 0
         self._delegate = DeadLockAvoidancePolicy(
             min_free_cell=1,
             show_debug_plot=False,
@@ -37,11 +39,17 @@ class DLAPolicy(RailEnvPolicy[Any, Any, RailEnvActions]):
         )
 
     def act_many(self, handles: List[int], observations: List[Any], **kwargs) -> Dict[int, RailEnvActions]:
+        self.calls_total += len(handles)
+        self.calls_episode += len(handles)
         return self._delegate.act_many(handles, observations, **kwargs)
 
     def reset_env(self, env) -> None:
         if hasattr(self._delegate, "reset"):
             self._delegate.reset(env)
+        self.calls_episode = 0
+
+    def get_debug_stats(self) -> Dict[str, int]:
+        return {"calls_total": self.calls_total, "calls_episode": self.calls_episode}
 
     def act(self, observation: Any, **kwargs) -> RailEnvActions:
         raise NotImplementedError("DLAPolicy is intended for act_many(handles, observations).")
