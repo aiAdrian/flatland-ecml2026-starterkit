@@ -7,7 +7,7 @@ from torch.distributions import Categorical
 
 from utils.action_utils import normalize_actions
 from utils.env_factory import SolverConfig, build_env, build_env_from_pkl, list_pkl_dataset
-from utils.model_utils import ActorCriticNet, split_obs_and_mask
+from utils.model_utils import ActorCriticNet, infer_obs_dim, split_obs_and_mask
 
 
 def _discounted_returns(rewards, gamma: float):
@@ -39,7 +39,15 @@ def train_mappo(args, checkpoint_path: Path, tb_logger=None) -> Path:
     else:
         env = build_env_from_pkl(pkl_files[0], obs_builder=obs_builder)
 
-    model = ActorCriticNet(obs_dim=36, action_dim=5)
+    probe_obs, _probe_info = env.reset(random_seed=args.seed)
+    del _probe_info
+    if isinstance(probe_obs, dict):
+        first_obs = probe_obs[0] if 0 in probe_obs else next(iter(probe_obs.values()))
+    else:
+        first_obs = probe_obs[0]
+    obs_dim = infer_obs_dim(first_obs, default=36)
+
+    model = ActorCriticNet(obs_dim=obs_dim, action_dim=5)
     if args.init_checkpoint and Path(args.init_checkpoint).exists():
         payload = torch.load(args.init_checkpoint, map_location="cpu")
         if "model_state" in payload:
@@ -82,7 +90,7 @@ def train_mappo(args, checkpoint_path: Path, tb_logger=None) -> Path:
                 values = []
 
                 for h, obs in zip(handles, obs_batch):
-                    feat, mask = split_obs_and_mask(obs)
+                    feat, mask = split_obs_and_mask(obs, obs_dim=obs_dim)
                     logits, value = model(feat)
                     logits = logits.masked_fill(mask < 0.5, float("-inf"))
                     dist = Categorical(logits=logits)
@@ -167,7 +175,7 @@ def train_mappo(args, checkpoint_path: Path, tb_logger=None) -> Path:
     torch.save(
         {
             "model_state": model.state_dict(),
-            "obs_dim": 36,
+            "obs_dim": obs_dim,
             "action_dim": 5,
             "kind": "mappo",
         },

@@ -8,7 +8,7 @@ import torch
 from flatland.envs.rail_env_action import RailEnvActions
 from flatland.envs.rail_env_policy import RailEnvPolicy
 
-from utils.model_utils import ActorCriticNet, split_obs_and_mask
+from utils.model_utils import ActorCriticNet, infer_obs_dim, split_obs_and_mask
 
 
 class MAPPOPolicy(RailEnvPolicy[Any, Any, RailEnvActions]):
@@ -17,13 +17,17 @@ class MAPPOPolicy(RailEnvPolicy[Any, Any, RailEnvActions]):
     def __init__(self, seed: int = 42, checkpoint_path: str | None = None):
         super().__init__()
         self.seed = seed
-        self.model = ActorCriticNet(obs_dim=36, action_dim=5)
+        self.obs_dim = 36
+        self.model = ActorCriticNet(obs_dim=self.obs_dim, action_dim=5)
         self.model.eval()
         self.loaded = False
         if checkpoint_path:
             path = Path(checkpoint_path)
             if path.exists():
                 payload = torch.load(path, map_location="cpu")
+                self.obs_dim = int(payload.get("obs_dim", self.obs_dim))
+                if self.obs_dim != self.model.obs_dim:
+                    self.model = ActorCriticNet(obs_dim=self.obs_dim, action_dim=5)
                 self.model.load_state_dict(payload["model_state"])
                 self.loaded = True
 
@@ -31,7 +35,14 @@ class MAPPOPolicy(RailEnvPolicy[Any, Any, RailEnvActions]):
         return {h: self.act(observations[idx]) for idx, h in enumerate(handles)}
 
     def act(self, observation: Any, **kwargs) -> RailEnvActions:
-        features, mask = split_obs_and_mask(observation)
+        if not self.loaded:
+            inferred = infer_obs_dim(observation, default=self.obs_dim)
+            if inferred != self.obs_dim:
+                self.obs_dim = inferred
+                self.model = ActorCriticNet(obs_dim=self.obs_dim, action_dim=5)
+                self.model.eval()
+
+        features, mask = split_obs_and_mask(observation, obs_dim=self.obs_dim)
         with torch.no_grad():
             logits, _ = self.model(features)
             logits = logits.masked_fill(mask < 0.5, float("-inf"))

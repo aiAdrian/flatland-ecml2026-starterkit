@@ -67,6 +67,11 @@ python main.py --mode train --policy mappo --env-source pkl --pkl-dir pkl_envs -
 # tensorboard (runs include mode/policy/params in folder name)
 tensorboard --logdir runs
 
+# legacy observation variants from flatland_minimal_project_NOT_WORKING_TRANSFORM
+python main.py --mode train --policy bc --obs-variant decision_point --episodes 2 --train-epochs 1
+python main.py --mode train --policy mappo --obs-variant spawn_aware --episodes 2 --train-epochs 1
+python main.py --mode eval --policy mappo --obs-variant conflict_aware --episodes 1
+
 # extract KPI hints from legacy PDF
 python tools/pdf_kpi_digest.py \
   --pdf ../flatland_minimal_project_NOT_WORKING_TRANSFORM/2026_05_FLATLAND_MARL_EXPERIMENT.pdf \
@@ -84,6 +89,16 @@ Logged metrics include:
 - eval summary: `success_rate`, `avg_steps`, `avg_reward`, `avg_deadlock_rate`
 - bc: `loss`, `accuracy`
 - mappo/ppo: `p_loss`, `v_loss`, `entropy`, `approx_kl`
+
+Observation variants (`--obs-variant`) for BC/MAPPO:
+
+- `fast_tree`: existing 36+mask observation (`reinforcement-learning/my_observation_builder.py`)
+- `decision_point`: legacy decision-point observation (22D base)
+- `spawn_aware`: legacy spawn-aware observation (25D base)
+- `conflict_aware`: legacy conflict-aware observation (44D base)
+
+Models now infer and store `obs_dim` in checkpoints, so BC/MAPPO can train/eval across these variants.
+On Flatland 4.2.5, `conflict_aware` may print repeated DLA helper warnings from legacy internals; training/eval still proceeds.
 
 The legacy PDF in `../flatland_minimal_project_NOT_WORKING_TRANSFORM/`
 is treated as guidance for diagnostics and KPI tracking. The utility script above

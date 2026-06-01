@@ -9,7 +9,7 @@ from policy.dla.observation import DLAFullEnvObservation
 from policy.dla.policy import DLAPolicy
 from utils.action_utils import normalize_actions
 from utils.env_factory import SolverConfig, build_env, build_env_from_pkl, list_pkl_dataset
-from utils.model_utils import DiscretePolicyNet, split_obs_and_mask
+from utils.model_utils import DiscretePolicyNet, infer_obs_dim, split_obs_and_mask
 
 
 def train_bc(args, checkpoint_path: Path, tb_logger=None) -> Path:
@@ -34,7 +34,14 @@ def train_bc(args, checkpoint_path: Path, tb_logger=None) -> Path:
     expert_obs_builder = DLAFullEnvObservation()
     del expert_obs_builder  # expert receives env directly in act_many
 
-    model = DiscretePolicyNet(obs_dim=36, action_dim=5)
+    probe_obs, _probe_info = env.reset(random_seed=args.seed)
+    del _probe_info
+    if isinstance(probe_obs, dict):
+        first_obs = probe_obs[0] if 0 in probe_obs else next(iter(probe_obs.values()))
+    else:
+        first_obs = probe_obs[0]
+    obs_dim = infer_obs_dim(first_obs, default=36)
+    model = DiscretePolicyNet(obs_dim=obs_dim, action_dim=5)
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)
 
     for epoch in range(args.train_epochs):
@@ -67,7 +74,7 @@ def train_bc(args, checkpoint_path: Path, tb_logger=None) -> Path:
                 masks = []
                 labels = []
                 for h, obs in zip(handles, obs_batch):
-                    f, m = split_obs_and_mask(obs)
+                    f, m = split_obs_and_mask(obs, obs_dim=obs_dim)
                     feats.append(f)
                     masks.append(m)
                     labels.append(norm_expert_actions[h])
@@ -118,7 +125,7 @@ def train_bc(args, checkpoint_path: Path, tb_logger=None) -> Path:
     torch.save(
         {
             "model_state": model.state_dict(),
-            "obs_dim": 36,
+            "obs_dim": obs_dim,
             "action_dim": 5,
             "kind": "bc",
         },

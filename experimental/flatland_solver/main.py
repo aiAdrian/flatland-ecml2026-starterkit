@@ -40,9 +40,15 @@ def make_policy_and_observation(args):
     if args.policy == "dla":
         return DLAPolicy(seed=args.seed), DLAFullEnvObservation()
     if args.policy == "bc":
-        return BCPolicy(checkpoint_path=str(args.bc_checkpoint)), BCObservationBuilder()
+        return (
+            BCPolicy(checkpoint_path=str(args.bc_checkpoint)),
+            BCObservationBuilder(obs_variant=args.obs_variant),
+        )
     if args.policy == "mappo":
-        return MAPPOPolicy(seed=args.seed, checkpoint_path=str(args.mappo_checkpoint)), MAPPOObservationBuilder()
+        return (
+            MAPPOPolicy(seed=args.seed, checkpoint_path=str(args.mappo_checkpoint)),
+            MAPPOObservationBuilder(obs_variant=args.obs_variant),
+        )
     raise ValueError(f"Unsupported policy: {args.policy}")
 
 
@@ -180,11 +186,11 @@ def run_eval(args) -> EvalStats:
 
 def run_train(args) -> None:
     if args.policy == "bc":
-        args.obs_builder = BCObservationBuilder()
+        args.obs_builder = BCObservationBuilder(obs_variant=args.obs_variant)
         train_bc(args, checkpoint_path=args.bc_checkpoint, tb_logger=getattr(args, "tb_logger", None))
         return
     if args.policy == "mappo":
-        args.obs_builder = MAPPOObservationBuilder()
+        args.obs_builder = MAPPOObservationBuilder(obs_variant=args.obs_variant)
         train_mappo(args, checkpoint_path=args.mappo_checkpoint, tb_logger=getattr(args, "tb_logger", None))
         return
     raise ValueError("Train mode currently supports --policy bc or --policy mappo")
@@ -205,6 +211,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-rails-between-cities", type=int, default=2)
     parser.add_argument("--max-rail-pairs-in-city", type=int, default=2)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--obs-variant",
+        choices=["fast_tree", "decision_point", "spawn_aware", "conflict_aware"],
+        default="fast_tree",
+    )
     parser.add_argument("--env-source", choices=["generated", "pkl"], default="generated")
     parser.add_argument("--pkl-dir", type=Path, default=Path("pkl_envs"))
     parser.add_argument("--pkl-count", type=int, default=32)
