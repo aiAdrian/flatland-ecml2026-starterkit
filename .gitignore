@@ -174,6 +174,8 @@ cython_debug/
 /outputs-meta
 /outputs-local
 /analysis-local
+/experimental/flatland-baselines
+/experimental/flatland_minimal_project_NOT_WORKING_TRANSFORM
 /debug-environments
 /debug-environments.zip
 
