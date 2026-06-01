@@ -172,6 +172,8 @@ cython_debug/
 /scenarios/
 /outputs
 /outputs-meta
+/outputs-local
+/analysis-local
 /debug-environments
 /debug-environments.zip
 
