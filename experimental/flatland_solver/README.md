@@ -25,16 +25,18 @@ This structure is organized by policy to keep related code together.
 ## Install  
  
 ### pyenv 
+```bash
 pyenv install 3.12.11
 pyenv virtualenv 3.12.11 flatland-ecml2026
 pyenv activate flatland-ecml2026
  
 pip install -r requirements_experimental_latest.txt
- 
+```
 
 ## pyenv
+```bash
 pyenv activate flatland-ecml2026 
-
+```
 
 ## Run
 
