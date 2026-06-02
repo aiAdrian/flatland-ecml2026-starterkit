@@ -34,22 +34,6 @@ def _ensure_rl_path() -> None:
         sys.path.insert(0, rl_path)
 
 
-def _ensure_legacy_obs_path() -> None:
-    repo_root = Path(__file__).resolve().parents[4]
-    legacy_root = repo_root / "experimental" / "flatland_minimal_project_NOT_WORKING_TRANSFORM"
-    legacy_dir = (
-        legacy_root
-        / "example"
-        / "flatland_rail_env"
-    )
-    legacy_root_path = str(legacy_root)
-    legacy_path = str(legacy_dir)
-    if legacy_root.exists() and legacy_root_path not in sys.path:
-        sys.path.insert(0, legacy_root_path)
-    if legacy_dir.exists() and legacy_path not in sys.path:
-        sys.path.insert(0, legacy_path)
-
-
 def MAPPOObservationBuilder(obs_variant: str = "fast_tree", debug: bool = False, search_depth: int = 4):
     obs_variant = str(obs_variant).lower()
 
@@ -59,7 +43,6 @@ def MAPPOObservationBuilder(obs_variant: str = "fast_tree", debug: bool = False,
 
         return FastTreeObsBuilder(max_depth=3, with_action_mask=True)
 
-    _ensure_legacy_obs_path()
     _patch_flatland_transition_api()
 
     def _compat(cls):
@@ -72,15 +55,15 @@ def MAPPOObservationBuilder(obs_variant: str = "fast_tree", debug: bool = False,
         return CompatObs
 
     if obs_variant == "decision_point":
-        from marl_attention_temporal_observation.decision_point_observation import DecisionPointObservation
+        from observations.decision_point_observation import DecisionPointObservation
 
         return _compat(DecisionPointObservation)(debug=bool(debug), search_depth=int(search_depth))
     if obs_variant == "spawn_aware":
-        from marl_attention_temporal_observation.spawn_aware_observation import SpawnAwareObservation
+        from observations.spawn_aware_observation import SpawnAwareObservation
 
         return _compat(SpawnAwareObservation)(debug=bool(debug), search_depth=int(search_depth))
     if obs_variant == "conflict_aware":
-        from marl_attention_temporal_observation.conflict_aware_observation import ConflictAwareObservation
+        from observations.conflict_aware_observation import ConflictAwareObservation
 
         return _compat(ConflictAwareObservation)(
             debug=bool(debug),

@@ -83,7 +83,7 @@ def record_dla_dataset(args, dataset_path: Path) -> Path:
     dp_utils = None
     if decision_point_only:
         try:
-            from marl_attention_temporal_observation.decision_point_utils import DecisionPointUtils
+            from observations.decision_point_utils import DecisionPointUtils
 
             dp_utils = DecisionPointUtils
         except Exception:

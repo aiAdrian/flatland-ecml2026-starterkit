@@ -26,7 +26,7 @@ from utils.env_factory import (
     write_pkl_metadata_index,
 )
 from utils.progress import RollingDoneRatio, format_console_row, format_episode_compact, make_progress_bar
-from utils.outcome_reward import build_outcome_reward
+from rewards.outcome_reward import build_outcome_reward
 from utils.tb_logger import TBLogger, format_args_text
 
 
@@ -239,11 +239,9 @@ def run_eval(args) -> EvalStats:
     if hasattr(policy, "reset_env"):
         policy.reset_env(env)
 
-    reward_shaper = None
-    if args.policy in {"bc", "mappo"}:
-        reward_shaper = build_outcome_reward(args)
-        if reward_shaper is not None:
-            print(reward_shaper.description())
+    reward_shaper = build_outcome_reward(args)
+    if reward_shaper is not None:
+        print(reward_shaper.description())
 
     renderer = RenderTool(env, gl="PGL") if args.rendering and env is not None else None
 

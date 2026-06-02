@@ -11,7 +11,9 @@ from torch.distributions import Categorical
 from flatland.envs.rail_env_action import RailEnvActions
 from flatland.envs.step_utils.states import TrainState
 
-from policy.mappo.policy import ActorCriticHead, BaseFeatureEncoder, TreePayloadEncoder
+from policy.mappo.actor_critic_head import ActorCriticHead
+from policy.mappo.base_feature_encoder import BaseFeatureEncoder
+from policy.mappo.tree_payload_encoder import TreePayloadEncoder
 from utils.action_utils import normalize_actions
 from utils.env_factory import (
     PklEnvMeta,
@@ -22,7 +24,7 @@ from utils.env_factory import (
     list_pkl_dataset_meta,
 )
 from utils.model_utils import infer_obs_dim
-from utils.outcome_reward import build_outcome_reward
+from rewards.outcome_reward import build_outcome_reward
 from utils.progress import RollingDoneRatio, format_console_row, format_episode_compact, format_ppo_update, make_progress_bar
 
 

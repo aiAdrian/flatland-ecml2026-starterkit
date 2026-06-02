@@ -1,6 +1,6 @@
 # flatland_solver (Policy-Centered Structure)
 
-This structure is organized by policy to keep related code together.
+This structure keeps policies in `policy/` and shared observation builders in a separate `observations/` folder.
 
 ## Layout
 
@@ -8,6 +8,14 @@ This structure is organized by policy to keep related code together.
 - `utils/`
   - `env_factory.py`
   - `action_utils.py`
+- `observations/`
+  - `decision_point_observation.py`
+  - `spawn_aware_observation.py`
+  - `conflict_aware_observation.py`
+  - `decision_point_utils.py`
+  - `conflict_predictor.py`
+- `rewards/`
+  - `outcome_reward.py`
 - `policy/random/`
   - `policy.py`
   - `observation.py`
@@ -17,10 +25,16 @@ This structure is organized by policy to keep related code together.
 - `policy/mappo/`
   - `policy.py`
   - `observation.py`
+  - `base_feature_encoder.py`
+  - `tree_payload_encoder.py`
+  - `actor_critic_head.py`
+  - `rollout_buffer.py`
 - `policy/bc/`
   - `policy.py`
   - `observation.py`
   - `trainer.py`
+
+The observation and DLA components needed by BC/MAPPO are integrated locally in this repository.
 
 ## Install  
  
