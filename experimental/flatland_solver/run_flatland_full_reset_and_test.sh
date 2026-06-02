@@ -6,7 +6,7 @@ PYTHON_BIN="${PYTHON_BIN:-/etc/pyenv/.pyenv/versions/flatland-ecml2026/bin/pytho
 
 cleanup_paths=(
   "$SOLVER_DIR/runs"
-  "$SOLVER_DIR/pkl_envs"
+  "$SOLVER_DIR/generated_envs"
   "$SOLVER_DIR/checkpoints"
 )
 
