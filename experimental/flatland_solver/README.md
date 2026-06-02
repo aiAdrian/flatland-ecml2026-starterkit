@@ -64,7 +64,7 @@ python main.py --mode eval --policy dla --episodes 1 --rendering
 # prepare reusable PKL scenarios for faster repeated training/eval
 python main.py --prepare-pkls --prepare-only --pkl-dir generated_envs --pkl-count 64 --pkl-seed-start 1000
 
-# curriculum-style cache (legacy behavior): N envs per agent-count
+# curriculum-style cache: N envs per agent-count
 python main.py --prepare-pkls --prepare-only --pkl-dir generated_envs \
   --agent-curriculum 1 2 3 4 5 7 10 15 20 --pkl-num-envs-per-agent 5
 
@@ -85,7 +85,7 @@ python main.py --mode train --policy mappo --curriculum-spec 5 --curriculum-repe
 # MAPPO with curriculum (sequence mode: varying agent counts)
 python main.py --mode train --policy mappo --curriculum-spec 1x5,5x5 --episodes 10 --train-epochs 1
 
-# MAPPO diagnostics from legacy doc guidance (entropy / approx_kl)
+# MAPPO diagnostics (entropy / approx_kl)
 python main.py --mode train --policy mappo --env-source pkl --pkl-dir generated_envs --episodes 3 --train-epochs 2 --debug-checks
 
 # tensorboard (runs include mode/policy/params in folder name)
@@ -111,12 +111,13 @@ Logged metrics include:
 Observation variants (`--obs-variant`) for BC/MAPPO:
 
 - `fast_tree`: existing 36+mask observation (`reinforcement-learning/my_observation_builder.py`)
-- `decision_point`: legacy decision-point observation (22D base)
-- `spawn_aware`: legacy spawn-aware observation (25D base)
-- `conflict_aware`: legacy conflict-aware observation (44D base)
+- `decision_point`: decision-point observation (22D base)
+- `spawn_aware`: spawn-aware observation (25D base)
+- `conflict_aware`: conflict-aware observation (44D base)
 
-Models now infer and store `obs_dim` in checkpoints, so BC/MAPPO can train/eval across these variants.
-On Flatland 4.2.5, `conflict_aware` may print repeated DLA helper warnings from legacy internals; training/eval still proceeds.
+BC and MAPPO now use the same observation factory, so recording, BC training, warmstart loading, MAPPO training, and eval can share the same `--obs-variant` path.
+Models infer and store `obs_dim` in checkpoints, so BC/MAPPO can train/eval across these variants.
+On Flatland 4.2.5, `conflict_aware` may print repeated DLA helper warnings from compatibility internals; training/eval still proceeds.
 
 ## 15-20 Min Validation Flow
 
@@ -336,9 +337,9 @@ Notes:
 - `--init-checkpoint` is used by MAPPO to warmstart model weights from BC.
 - Keep `--obs-variant` consistent between recording and BC training for best results.
 
-### Full Training (Legacy-Close MAPPO Loop)
+### Full Training (Unified BC -> MAPPO Loop)
 
-This is the recommended end-to-end run when you want legacy-like MAPPO behavior
+This is the recommended end-to-end run when you want the unified BC -> MAPPO flow
 (collect rollout episodes first, then PPO K-epoch mini-batch updates, with
 mid-training eval checkpoints).
 
@@ -366,7 +367,7 @@ python main.py --mode train --policy bc \
   --train-epochs 20 --batch-size 256 --lr 3e-4 \
   --bc-checkpoint checkpoints/bc.pt
 
-# 4) MAPPO warmstart + legacy-close train loop
+# 4) MAPPO warmstart + PPO train loop
 python main.py --mode train --policy mappo \
   --env-source pkl --pkl-dir generated_envs \
   --episodes 200 --train-epochs 5 --max-episode-steps 300 \
@@ -401,8 +402,8 @@ tensorboard --logdir runs
 ## KPI Artifacts
 
 - TensorBoard logs: `runs/`
-- PDF KPI digest: `runs/legacy_kpi_digest.md`
-- Extracted raw PDF text: `runs/legacy_kpi_raw.txt`
+- PDF KPI digest: `runs/kpi_digest.md`
+- Extracted raw PDF text: `runs/kpi_raw.txt`
 
 ## Complete Reset & Automated Test Suite
 
@@ -416,7 +417,7 @@ A shell script is provided to clean up all previous runs and generated data, the
 **What the script does:**
 1. Removes `runs/`, `generated_envs/`, and `checkpoints/` directories to start fresh
 2. Runs random policy eval (baseline sanity check)
-3. Runs DLA policy eval (legacy heuristic baseline)
+3. Runs DLA policy eval (heuristic baseline)
 4. Trains BC for 200 episodes × 5 epochs on `decision_point` observations
 5. Evaluates BC on 20 episodes
 6. Trains MAPPO for 200 episodes × 5 epochs on `spawn_aware` observations
@@ -546,7 +547,7 @@ Standard metrics logged to TensorBoard:
 | `--curriculum-spec` | `str` | `None` | Curriculum spec: `"5"` (repeat) or `"3x10,5x10"` (sequence) |
 | `--curriculum-mode` | `{auto,repeat,sequence}` | `auto` | How to parse `--curriculum-spec` |
 | `--curriculum-repeat` | `int` | `None` | Repeat count for repeat mode (e.g., `5` + repeat 10 → [5]*10) |
-| `--agent-curriculum` | `int [int ...]` | `None` | Legacy: list agent counts directly (e.g., `--agent-curriculum 1 2 3 5`) |
+| `--agent-curriculum` | `int [int ...]` | `None` | Explicit list of agent counts (e.g., `--agent-curriculum 1 2 3 5`) |
 
 ### MAPPO Training Control
 
@@ -569,6 +570,8 @@ Standard metrics logged to TensorBoard:
 |------|------|---------|-------------|
 | `--obs-variant` | `{fast_tree,decision_point,spawn_aware,conflict_aware}` | `fast_tree` | Observation variant for policies |
 | `--obs` | (alias) | — | Legacy alias for `--obs-variant` |
+| `--obs-debug` | `flag` | `False` | Enable verbose observation debug/performance reporting |
+| `--obs-search-depth` | `int` | `4` | Search depth for observation variants |
 | `--env-source` | `{generated,pkl}` | `generated` | Environment source (on-the-fly or pre-cached) |
 | `--pkl-dir` | `Path` | `generated_envs` | Directory for PKL cache |
 | `--pkl-count` | `int` | `32` | Number of PKL environments to generate |
@@ -578,7 +581,7 @@ Standard metrics logged to TensorBoard:
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--disable-outcome-reward` | `flag` | `False` | Disable legacy outcome-based reward shaping |
+| `--disable-outcome-reward` | `flag` | `False` | Disable outcome-based reward shaping |
 
 Example with all curriculum + MAPPO settings:
 

@@ -11,7 +11,7 @@ import time
 import torch
 from flatland.envs.step_utils.states import TrainState
 
-from policy.bc.observation import BCObservationBuilder
+from observations.factory import build_observation_builder
 from policy.dla.policy import DLAPolicy
 from utils.action_utils import normalize_actions
 from utils.env_factory import SolverConfig, build_env, build_env_from_pkl, list_pkl_dataset
@@ -21,10 +21,10 @@ from utils.progress import RollingDoneRatio, format_console_row, format_episode_
 
 def record_dla_dataset(args, dataset_path: Path) -> Path:
     """Run DLA on all PKL environments (or generated envs) and save dataset."""
-    obs_builder = BCObservationBuilder(
+    obs_builder = build_observation_builder(
         obs_variant=args.obs_variant,
-        debug=bool(getattr(args, "legacy_obs_debug", False)),
-        search_depth=int(getattr(args, "legacy_obs_search_depth", 4)),
+        debug=bool(getattr(args, "obs_debug", False)),
+        search_depth=int(getattr(args, "obs_search_depth", 4)),
     )
     cfg = SolverConfig(
         width=args.width,

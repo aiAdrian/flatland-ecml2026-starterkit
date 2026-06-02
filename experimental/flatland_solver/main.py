@@ -5,17 +5,16 @@ from pathlib import Path
 from flatland.envs.step_utils.states import TrainState
 from flatland.utils.rendertools import RenderTool
 
-from policy.bc.observation import BCObservationBuilder
 from policy.bc.policy import BCPolicy
 from policy.bc.recorder import record_dla_dataset
 from policy.bc.trainer import train_bc, train_bc_from_dataset
 from policy.dla.observation import DLAFullEnvObservation
 from policy.dla.policy import DLAPolicy
-from policy.mappo.observation import MAPPOObservationBuilder
 from policy.mappo.policy import MAPPOPolicy
 from policy.mappo.trainer import train_mappo
 from policy.random.observation import RandomObservationBuilder
 from policy.random.policy import RandomPolicy
+from observations.factory import build_observation_builder
 from utils.action_utils import normalize_actions
 from utils.env_factory import (
     SolverConfig,
@@ -94,19 +93,19 @@ def make_policy_and_observation(args):
     if args.policy == "bc":
         return (
             BCPolicy(checkpoint_path=str(args.bc_checkpoint)),
-            BCObservationBuilder(
+            build_observation_builder(
                 obs_variant=args.obs_variant,
-                debug=bool(getattr(args, "legacy_obs_debug", False)),
-                search_depth=int(getattr(args, "legacy_obs_search_depth", 4)),
+                debug=bool(getattr(args, "obs_debug", False)),
+                search_depth=int(getattr(args, "obs_search_depth", 4)),
             ),
         )
     if args.policy == "mappo":
         return (
             MAPPOPolicy(seed=args.seed, checkpoint_path=str(args.mappo_checkpoint)),
-            MAPPOObservationBuilder(
+            build_observation_builder(
                 obs_variant=args.obs_variant,
-                debug=bool(getattr(args, "legacy_obs_debug", False)),
-                search_depth=int(getattr(args, "legacy_obs_search_depth", 4)),
+                debug=bool(getattr(args, "obs_debug", False)),
+                search_depth=int(getattr(args, "obs_search_depth", 4)),
             ),
         )
     raise ValueError(f"Unsupported policy: {args.policy}")
@@ -373,7 +372,7 @@ def run_record(args) -> None:
     record_dla_dataset(args, dataset_path=args.dataset_path)
 
 
-def _ensure_legacy_bc_pkls(args) -> None:
+def _ensure_bc_default_pkls(args) -> None:
     if args.env_source != "pkl":
         return
     pkl_files = list_pkl_dataset(args.pkl_dir)
@@ -381,7 +380,7 @@ def _ensure_legacy_bc_pkls(args) -> None:
         print(f"[Env] Using {len(pkl_files)} cached environments at {args.pkl_dir}")
         return
 
-    # Legacy BC default curriculum: 5 envs per agent-count.
+    # Default BC curriculum: 5 envs per agent-count.
     if not args.agent_curriculum:
         args.agent_curriculum = [1, 2, 3, 4, 5, 7, 10, 15, 20]
     if int(args.pkl_num_envs_per_agent) <= 0:
@@ -403,10 +402,10 @@ def run_bc_mode(args) -> None:
     print("BEHAVIOR CLONING from DLA expert (decision-points only)")
     print("=" * 70)
 
-    # Legacy command semantics: BC pipeline always runs on MAPPO observations via PKL cache.
+    # BC mode semantics: the BC pipeline runs against a PKL cache by default.
     args.policy = "bc"
     args.env_source = "pkl"
-    _ensure_legacy_bc_pkls(args)
+    _ensure_bc_default_pkls(args)
 
     record_args = argparse.Namespace(**vars(args))
     record_args.episodes = int(args.bc_demo_episodes)
@@ -430,10 +429,10 @@ def run_bc_mode(args) -> None:
 
 def run_train(args) -> None:
     if args.policy == "bc":
-        args.obs_builder = BCObservationBuilder(
+        args.obs_builder = build_observation_builder(
             obs_variant=args.obs_variant,
-            debug=bool(getattr(args, "legacy_obs_debug", False)),
-            search_depth=int(getattr(args, "legacy_obs_search_depth", 4)),
+            debug=bool(getattr(args, "obs_debug", False)),
+            search_depth=int(getattr(args, "obs_search_depth", 4)),
         )
         if getattr(args, "dataset_path", None) and args.dataset_path.exists():
             # Offline mode: train from pre-recorded DLA dataset (fast, no DLA overhead)
@@ -443,10 +442,10 @@ def run_train(args) -> None:
             train_bc(args, checkpoint_path=args.bc_checkpoint, tb_logger=getattr(args, "tb_logger", None))
         return
     if args.policy == "mappo":
-        args.obs_builder = MAPPOObservationBuilder(
+        args.obs_builder = build_observation_builder(
             obs_variant=args.obs_variant,
-            debug=bool(getattr(args, "legacy_obs_debug", False)),
-            search_depth=int(getattr(args, "legacy_obs_search_depth", 4)),
+            debug=bool(getattr(args, "obs_debug", False)),
+            search_depth=int(getattr(args, "obs_search_depth", 4)),
         )
         train_mappo(args, checkpoint_path=args.mappo_checkpoint, tb_logger=getattr(args, "tb_logger", None))
         return
@@ -544,10 +543,10 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Path for DLA-recorded dataset (--mode record writes, --mode train reads)")
     parser.add_argument("--batch-size", type=int, default=256,
                         help="Mini-batch size for offline BC training from dataset")
-    parser.add_argument("--legacy-obs-debug", action="store_true",
-                        help="Enable verbose legacy observation debug/performance reporting")
-    parser.add_argument("--legacy-obs-search-depth", type=int, default=4,
-                        help="Search depth for legacy observation variants")
+    parser.add_argument("--obs-debug", "--legacy-obs-debug", dest="obs_debug", action="store_true",
+                        help="Enable verbose observation debug/performance reporting")
+    parser.add_argument("--obs-search-depth", "--legacy-obs-search-depth", dest="obs_search_depth", type=int, default=4,
+                        help="Search depth for observation variants")
     parser.add_argument("--disable-outcome-reward", action="store_true",
                         help="Disable legacy OutcomeBasedReward shaping for BC/MAPPO train/eval")
     parser.add_argument("--bc-demo-episodes", type=int, default=200,

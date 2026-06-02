@@ -1,0 +1,74 @@
+from pathlib import Path
+import sys
+
+
+def _patch_flatland_transition_api() -> None:
+    from flatland.core.transition_map import GridTransitionMap
+
+    if getattr(GridTransitionMap, "_legacy_signature_compat", False):
+        return
+
+    original = GridTransitionMap.get_transitions
+
+    def compat(self, *args):
+        # Flatland 4.x native call shape.
+        if len(args) == 1:
+            return original(self, args[0])
+        # Compatibility calls: get_transitions((r,c), dir)
+        if len(args) == 2:
+            return original(self, (args[0], int(args[1])))
+        # Compatibility calls: get_transitions(r, c, dir)
+        if len(args) == 3:
+            return original(self, ((int(args[0]), int(args[1])), int(args[2])))
+        return original(self, *args)
+
+    GridTransitionMap.get_transitions = compat
+    GridTransitionMap._legacy_signature_compat = True
+
+
+def _ensure_rl_path() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    rl_dir = repo_root / "reinforcement-learning"
+    rl_path = str(rl_dir)
+    if rl_dir.exists() and rl_path not in sys.path:
+        sys.path.insert(0, rl_path)
+
+
+def build_observation_builder(obs_variant: str = "fast_tree", debug: bool = False, search_depth: int = 4):
+    obs_variant = str(obs_variant).lower()
+
+    if obs_variant == "fast_tree":
+        _ensure_rl_path()
+        from my_observation_builder import FastTreeObsBuilder
+
+        return FastTreeObsBuilder(max_depth=3, with_action_mask=True)
+
+    _patch_flatland_transition_api()
+
+    def _compat(cls):
+        class CompatObs(cls):
+            def _rail_get_transitions(self, pos, direction):
+                p = self._pos_tuple(pos)
+                return self.env.rail.get_transitions((p, int(direction)))
+
+        CompatObs.__name__ = f"Compat{cls.__name__}"
+        return CompatObs
+
+    if obs_variant == "decision_point":
+        from observations.decision_point_observation import DecisionPointObservation
+
+        return _compat(DecisionPointObservation)(debug=bool(debug), search_depth=int(search_depth))
+    if obs_variant == "spawn_aware":
+        from observations.spawn_aware_observation import SpawnAwareObservation
+
+        return _compat(SpawnAwareObservation)(debug=bool(debug), search_depth=int(search_depth))
+    if obs_variant == "conflict_aware":
+        from observations.conflict_aware_observation import ConflictAwareObservation
+
+        return _compat(ConflictAwareObservation)(
+            debug=bool(debug),
+            search_depth=int(search_depth),
+            verbose_first_call=bool(debug),
+        )
+
+    raise ValueError(f"Unsupported --obs-variant: {obs_variant}")
