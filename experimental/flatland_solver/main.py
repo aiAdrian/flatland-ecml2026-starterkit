@@ -29,6 +29,16 @@ from rewards.outcome_reward import build_outcome_reward
 from utils.tb_logger import TBLogger, format_args_text
 
 
+def _safe_close_renderer(renderer) -> None:
+    if renderer is None:
+        return
+    try:
+        renderer.close_window()
+    except AttributeError as exc:
+        if "window" not in str(exc):
+            raise
+
+
 def parse_curriculum_spec(spec: str | None, mode: str = "auto") -> list[int] | None:
     """
     Parse curriculum specification.
@@ -242,7 +252,7 @@ def run_eval(args) -> EvalStats:
     if reward_shaper is not None:
         print(reward_shaper.description())
 
-    renderer = RenderTool(env, gl="PGL") if args.rendering and env is not None else None
+    renderer = RenderTool(env, gl="PGL", show_debug=True) if args.rendering and env is not None else None
 
     total_done_agents = 0
     total_agents = 0
@@ -260,9 +270,8 @@ def run_eval(args) -> EvalStats:
         if args.env_source == "pkl":
             pkl_path = pkl_files[episode % len(pkl_files)]
             env = build_env_from_pkl(pkl_path, obs_builder=obs_builder)
-            if renderer is not None:
-                renderer.close_window()
-            renderer = RenderTool(env, gl="PGL") if args.rendering else None
+            _safe_close_renderer(renderer)
+            renderer = RenderTool(env, gl="PGL", show_debug=True) if args.rendering else None
 
         if hasattr(policy, "reset_env"):
             policy.reset_env(env)
@@ -289,7 +298,7 @@ def run_eval(args) -> EvalStats:
                     show=True,
                     show_agents=True,
                     show_inactive_agents=False,
-                    show_observations=False,
+                    show_observations=True,
                     show_predictions=False,
                     frames=False,
                 )
@@ -333,8 +342,7 @@ def run_eval(args) -> EvalStats:
 
     bar.close()
 
-    if renderer is not None:
-        renderer.close_window()
+    _safe_close_renderer(renderer)
 
     if getattr(args, "tb_logger", None) is not None:
         args.tb_logger.log_eval_summary(

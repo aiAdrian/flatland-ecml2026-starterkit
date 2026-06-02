@@ -138,6 +138,7 @@ class DecisionPointObservation(ObservationBuilder):
     def __init__(self,
                  debug: bool = False,
                  search_depth: int = 4):
+        print(">>", __class__.__name__)
         super().__init__()
         if debug:
             os.environ["DEBUG_OBSERVATION"] = "1"
@@ -808,7 +809,7 @@ class DecisionPointObservation(ObservationBuilder):
 
         if not hasattr(self.env, "dev_obs_dict") or self.env.dev_obs_dict is None:
             self.env.dev_obs_dict = {}
-
+        
         overlay = {
             0: set(),
             1: set(),

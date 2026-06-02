@@ -74,6 +74,7 @@ class SpawnAwareObservation(DecisionPointObservation):
                  debug: bool = False,
                  search_depth: int = 4,
                  verbose_first_call: bool = False):
+        print(">>", __class__.__name__)
         super().__init__(debug=debug, search_depth=search_depth)
         self._spawn_first_call_logged = False
         self._spawn_verbose = bool(verbose_first_call)

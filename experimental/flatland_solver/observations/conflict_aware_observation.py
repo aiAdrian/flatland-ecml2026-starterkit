@@ -72,6 +72,7 @@ class ConflictAwareObservation(SpawnAwareObservation):
         verbose_first_call: bool = True,
         conflict_horizon: int = HORIZON_K,
     ):
+        print(">>", __class__.__name__)
         super().__init__(
             debug=debug,
             search_depth=search_depth,
@@ -130,7 +131,14 @@ class ConflictAwareObservation(SpawnAwareObservation):
             if need_reinit:
                 try:
                     self._internal_dla = DeadLockAvoidancePolicy(
-                        self.env, action_size=5, enable_eps=False
+                        min_free_cell=1,
+                        show_debug_plot=False,
+                        count_num_opp_agents_towards_min_free_cell=True,
+                        use_switches_heuristic=True,
+                        use_entering_prevention=False,
+                        use_alternative_at_first_intermediate_and_then_always_first_strategy=3,
+                        k_shortest_path_cutoff=500,
+                        verbose=False,
                     )
                     self._internal_dla._cached_n_agents = n_agents_now
                     self._internal_dla_env_id = id(self.env)
@@ -140,12 +148,9 @@ class ConflictAwareObservation(SpawnAwareObservation):
                     self._internal_dla_env_id = None
             if self._internal_dla is not None:
                 try:
-                    self._internal_dla.start_step(train=False)
-                    self._dla_cache = self._internal_dla.agent_can_move or {}
+                    actions = self._internal_dla.act_many(handles, [self.env for _ in handles])
+                    self._dla_cache = actions
                 except Exception as e:
-                    # Drop DLA so it rebuilds fresh next call
-                    print(f"[ConflictAwareObs] DLA start_step failed: {e} "
-                          f"(n_agents={n_agents_now}) — dropping for fresh init")
                     self._internal_dla = None
                     self._dla_cache = {}
         return super().get_many(handles, is_end_of_episode, episode_count)
@@ -163,9 +168,8 @@ class ConflictAwareObservation(SpawnAwareObservation):
             feats[4] = 1.0  # default: STOP
             return feats
         try:
-            action_val = entry[3] if isinstance(entry, (tuple, list)) else entry
-            action_int = int(action_val)
-            if 0 <= action_int <= 4:
+            action_int = int(entry.value)
+            if 0 <= action_int < 4:
                 feats[action_int] = 1.0
             else:
                 feats[4] = 1.0

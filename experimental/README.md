@@ -1,73 +1,78 @@
-# Experimental Setup Overview
+# Experimental Workspace
 
-This folder contains the standalone migration and reference material for the new Flatland workflow.
+This directory contains the maintained Flatland experiment runner plus older reference material that was used during migration.
 
-## Goal
+## What Is Active
 
-Provide a clean migration workspace for Flatland experiments with:
-- Baselines: `random`, `deadlock avoidance (DLA)`
-- Training stages: `behavior cloning (BC)`, then `MAPPO`
-- Optional live rendering during eval
+The main runnable path is `experimental/flatland_solver/`.
 
-## Current Status
+It supports:
+- Baseline evaluation: `random`, `dla`
+- Dataset recording from DLA
+- Offline behavior cloning (BC)
+- MAPPO training with optional BC warmstart
+- Shared observation factory for BC and MAPPO
+- PKL-backed environment caches in `generated_envs/`
+- Outcome-based reward shaping
+- TensorBoard logging and compact console output
 
-- Research/reference code is available under `experimental/flatland-baselines/` and
-  `experimental/flatland_minimal_project_NOT_WORKING_TRANSFORM/`.
-- New standalone runner exists under `experimental/flatland_solver/` with
-  policy-centered layout (`policy/dla`, `policy/random`, `policy/mappo`).
+The detailed command reference lives in `experimental/flatland_solver/README.md`.
 
-## Folder Structure (experimental)
+## What Is Reference Only
 
-- `experimental/examples/`
-  - Small standalone examples (for quick local validation)
+These directories are retained as migration/reference material and are not required as runtime dependencies for `experimental/flatland_solver/`:
 - `experimental/flatland-baselines/`
-  - Upstream baseline reference code (including DLA implementation)
 - `experimental/flatland_minimal_project_NOT_WORKING_TRANSFORM/`
-  - Legacy/minimal MARL project used for feature and architecture extraction
-- `experimental/requirements_experimental_latest.txt`
-  - Consolidated dependency set for experimental migration
-- `experimental/utils/flatland_env_persist_util.py`
-  - Static helper for Flatland environment save/load/generation via pickle
+
+They are useful for comparison, provenance, or one-off lookup, but the solver now carries the needed BC/MAPPO observation code and DLA runtime code locally.
+
+## Folder Overview
+
 - `experimental/flatland_solver/`
-  - Main runnable structure (main entry point + policy-centric modules)
+  Main runnable experiment stack.
+- `experimental/examples/`
+  Small standalone examples and scratch material.
+- `experimental/flatland-baselines/`
+  Upstream/reference baseline sources.
+- `experimental/flatland_minimal_project_NOT_WORKING_TRANSFORM/`
+  Older MARL reference project used during extraction/migration.
+- `experimental/requirements_experimental_latest.txt`
+  Experimental dependency set.
+- `experimental/utils/flatland_env_persist_util.py`
+  Helper for Flatland environment persistence/generation.
 
 ## Quick Start
 
 From repository root:
 
 ```bash
-cd /home/u216993/workspace/ai4realnet/flatland-ecml2026-starterkit
-
-# activate pyenv env
-# eval "$(pyenv init -)"
-# eval "$(pyenv virtualenv-init -)"
-# pyenv activate flatland-ecml2026
-
-# install/update deps
-pip install -r experimental/requirements_experimental_latest.txt
-
-# inspect available experimental sources
-find experimental -maxdepth 3 -type d | sort
-
-# run new policy-centered solver
 cd experimental/flatland_solver
+
+# install/update experimental deps from repository root beforehand if needed:
+# pip install -r experimental/requirements_experimental_latest.txt
+
+# baseline checks
 python main.py --mode eval --policy random --episodes 3
 python main.py --mode eval --policy dla --episodes 3
-python main.py --mode eval --policy dla --episodes 1 --rendering
+
+# prepare reusable PKL environments
+python main.py --prepare-pkls --prepare-only --pkl-dir generated_envs --pkl-count 32 --pkl-seed-start 1000
+
+# record DLA dataset, train BC, then train MAPPO
+python main.py --mode record --policy bc --env-source pkl --pkl-dir generated_envs --episodes 20 --obs-variant decision_point
+python main.py --mode train --policy bc --dataset-path datasets/dla_dataset.pt --train-epochs 5 --obs-variant decision_point
+python main.py --mode train --policy mappo --env-source pkl --pkl-dir generated_envs --init-checkpoint checkpoints/bc.pt --episodes 20 --obs-variant spawn_aware
 ```
 
-## Current Implemented Flow
+## Auxiliary Tools
 
-1. Baseline eval: `random`, `dla`.
-2. BC training and checkpoint save/load.
-3. MAPPO training and checkpoint save/load.
-4. TensorBoard logging (`eval`, `eval_summary`, `bc`, `ppo`).
-5. PKL-based environment workflow for faster repeated training/eval.
-6. Legacy PDF KPI extraction utility (`tools/pdf_kpi_digest.py`).
-
-See `experimental/flatland_solver/README.md` for the full command matrix.
+- `experimental/flatland_solver/run_flatland_full_reset_and_test.sh`
+  Full reset plus baseline/BC/MAPPO smoke-to-long run script.
+- `experimental/flatland_solver/tools/pdf_kpi_digest.py`
+  Utility to extract KPI-related text from PDFs into searchable artifacts.
 
 ## Notes
 
-- `experimental/flatland-baselines/` and `experimental/flatland_minimal_project_NOT_WORKING_TRANSFORM/` are intentionally ignored by git in this repo.
-- Rendering is live-window based, no mandatory video export.
+- `experimental/flatland_solver/` is the maintained execution path.
+- The Starter Kit root and `reinforcement-learning/` are kept separate from solver-local refactors.
+- Rendering is live-window based; no mandatory video export pipeline is assumed here.

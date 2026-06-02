@@ -37,7 +37,7 @@ def _send_flatland_deadlock_avoidance_policy_data_change_signal_to_reset_lru_cac
 class DeadLockAvoidancePolicy(SetPathPolicy):
     def __init__(self,
                  min_free_cell: int = 1,
-                 show_debug_plot: bool = False,
+                 show_debug_plot: bool = True,
                  count_num_opp_agents_towards_min_free_cell: bool = True,
                  use_switches_heuristic: bool = True,
                  use_entering_prevention: bool = False,

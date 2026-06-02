@@ -87,6 +87,40 @@ def _build_legacy_bc_stack(base_dim: int):
     return base_encoder, tree_encoder, fuse, head, hidden
 
 
+def _maybe_resume_bc(
+    checkpoint_path: Path,
+    base_encoder: BaseFeatureEncoder,
+    tree_encoder: TreePayloadEncoder,
+    fuse: nn.Module,
+    head: ActorCriticHead,
+    optimizer: torch.optim.Optimizer,
+) -> bool:
+    if not checkpoint_path.exists():
+        return False
+
+    try:
+        payload = torch.load(checkpoint_path, map_location="cpu")
+    except Exception:
+        return False
+
+    if not all(k in payload for k in ["base_encoder", "tree_encoder", "fuse", "head"]):
+        return False
+
+    base_encoder.load_state_dict(payload["base_encoder"], strict=False)
+    tree_encoder.load_state_dict(payload["tree_encoder"], strict=False)
+    fuse.load_state_dict(payload["fuse"], strict=False)
+    head.load_state_dict(payload["head"], strict=False)
+
+    if "optimizer" in payload:
+        try:
+            optimizer.load_state_dict(payload["optimizer"])
+        except Exception:
+            # Keep resumed model weights even if optimizer state is incompatible.
+            pass
+
+    return True
+
+
 def train_bc(args, checkpoint_path: Path, tb_logger=None) -> Path:
     obs_builder = args.obs_builder
     cfg = SolverConfig(
@@ -128,6 +162,7 @@ def train_bc(args, checkpoint_path: Path, tb_logger=None) -> Path:
         + list(head.parameters()),
         lr=args.lr,
     )
+    resumed = _maybe_resume_bc(checkpoint_path, base_encoder, tree_encoder, fuse, head, optimizer)
 
     print(
         format_console_row(
@@ -141,6 +176,7 @@ def train_bc(args, checkpoint_path: Path, tb_logger=None) -> Path:
             pkl_dir=str(args.pkl_dir),
             max_steps=args.max_episode_steps,
             base_dim=base_dim,
+            resumed=resumed,
         )
     )
 
@@ -257,6 +293,7 @@ def train_bc(args, checkpoint_path: Path, tb_logger=None) -> Path:
             "tree_encoder": tree_encoder.state_dict(),
             "fuse": fuse.state_dict(),
             "head": head.state_dict(),
+            "optimizer": optimizer.state_dict(),
             "base_dim": int(base_dim),
             "hidden": int(hidden),
             "obs_dim": int(obs_dim),
@@ -286,6 +323,17 @@ def train_bc_from_dataset(args, checkpoint_path: Path, tb_logger=None) -> Path:
     obs_variant = str(data.get("obs_variant", getattr(args, "obs_variant", "unknown")))
     n_samples = feats.shape[0]
 
+    base_dim = int(obs_dim)
+    base_encoder, tree_encoder, fuse, head, hidden = _build_legacy_bc_stack(base_dim=base_dim)
+    optimizer = torch.optim.Adam(
+        list(base_encoder.parameters())
+        + list(tree_encoder.parameters())
+        + list(fuse.parameters())
+        + list(head.parameters()),
+        lr=args.lr,
+    )
+    resumed = _maybe_resume_bc(checkpoint_path, base_encoder, tree_encoder, fuse, head, optimizer)
+
     batch_size = getattr(args, "batch_size", 256)
     print(format_console_row("dataset", "bc", path=str(dataset_path), n_samples=n_samples, obs_dim=obs_dim))
     print(
@@ -296,17 +344,8 @@ def train_bc_from_dataset(args, checkpoint_path: Path, tb_logger=None) -> Path:
             batch_size=batch_size,
             lr=args.lr,
             obs=obs_variant,
+            resumed=resumed,
         )
-    )
-
-    base_dim = int(obs_dim)
-    base_encoder, tree_encoder, fuse, head, hidden = _build_legacy_bc_stack(base_dim=base_dim)
-    optimizer = torch.optim.Adam(
-        list(base_encoder.parameters())
-        + list(tree_encoder.parameters())
-        + list(fuse.parameters())
-        + list(head.parameters()),
-        lr=args.lr,
     )
 
     legal_for_expert = masks[torch.arange(n_samples), labels] > 0.5
@@ -384,6 +423,7 @@ def train_bc_from_dataset(args, checkpoint_path: Path, tb_logger=None) -> Path:
             "tree_encoder": tree_encoder.state_dict(),
             "fuse": fuse.state_dict(),
             "head": head.state_dict(),
+            "optimizer": optimizer.state_dict(),
             "base_dim": int(base_dim),
             "hidden": int(hidden),
             "obs_dim": int(obs_dim),
