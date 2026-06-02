@@ -16,7 +16,7 @@ from policy.dla.policy import DLAPolicy
 from utils.action_utils import normalize_actions
 from utils.env_factory import SolverConfig, build_env, build_env_from_pkl, list_pkl_dataset
 from utils.model_utils import infer_obs_dim, split_obs_and_mask
-from utils.progress import RollingDoneRatio, format_console_row, make_progress_bar
+from utils.progress import RollingDoneRatio, format_console_row, format_episode_compact, make_progress_bar
 
 
 def record_dla_dataset(args, dataset_path: Path) -> Path:
@@ -148,8 +148,16 @@ def record_dla_dataset(args, dataset_path: Path) -> Path:
         bar.set_secondary(rolling_done.window_ratio(), rolling_done.format_postfix())
         bar.set_postfix_str(f"s={steps} done={ep_done}/{env.get_num_agents()} samples={ep_samples}")
         bar.update(1)
-        print(format_console_row("record", "dla", ep=f"{ep + 1}/{n_episodes}", steps=steps,
-                                 done=f"{ep_done}/{env.get_num_agents()}", samples=ep_samples))
+        print(
+            format_episode_compact(
+                "REC",
+                episode=ep + 1,
+                total=n_episodes,
+                done=ep_done,
+                n_agents=env.get_num_agents(),
+                samples=ep_samples,
+            )
+        )
 
         # Legacy-like periodic progress line (print each episode for full trace).
         now = time.perf_counter()

@@ -23,7 +23,7 @@ from utils.env_factory import (
 )
 from utils.model_utils import infer_obs_dim
 from utils.outcome_reward import build_outcome_reward
-from utils.progress import RollingDoneRatio, format_console_row, make_progress_bar
+from utils.progress import RollingDoneRatio, format_console_row, format_episode_compact, format_ppo_update, make_progress_bar
 
 
 def _group_pkls_by_n_agents(metas: list[PklEnvMeta], curriculum: list[int]) -> dict[int, list[Path]]:
@@ -323,6 +323,8 @@ def _ppo_update(
     max_grad_norm: float,
     target_kl: float,
     kl_stop_factor: float,
+    epoch: int = 0,
+    total_epochs: int = 1,
 ) -> dict[str, float] | None:
     if batch is None:
         return None
@@ -437,10 +439,18 @@ def _ppo_update(
     out["head_max_dparam"] = float(max_param_change)
 
     print(
-        f"[PPO-DEBUG] DONE n_mb={n_minibatches} "
-        f"KL={out.get('approx_kl', 0.0):+.6f} ratio={out.get('ratio', 0.0):.5f} "
-        f"head_max_dparam={out.get('head_max_dparam', 0.0):.6f} "
-        f"clip_frac={out.get('clip_frac', 0.0):.3f}"
+        format_ppo_update(
+            epoch=epoch,
+            total_epochs=total_epochs,
+            batch_num=n_minibatches,
+            n_samples=n,
+            approx_kl=out.get("approx_kl", 0.0),
+            ratio=out.get("ratio", 0.0),
+            p_loss=out.get("p_loss", 0.0),
+            v_loss=out.get("v_loss", 0.0),
+            clip_frac=out.get("clip_frac", 0.0),
+            entropy=out.get("entropy", 0.0),
+        )
     )
 
     return out
@@ -679,6 +689,7 @@ def train_mappo(args, checkpoint_path: Path, tb_logger=None) -> Path:
             "clip_frac": 0.0,
         }
 
+        prev_n_agents = None
         while ep < args.episodes:
             if curriculum_mode:
                 target_rollout_eps = min(args.episodes - ep, max(1, len(curriculum)))
@@ -687,6 +698,13 @@ def train_mappo(args, checkpoint_path: Path, tb_logger=None) -> Path:
 
             episodes_block: list[dict[str, Any]] = []
             block_collected = 0
+
+            # Detect curriculum transitions
+            if curriculum_mode and curriculum:
+                next_n_agents = curriculum[ep % len(curriculum)]
+                if next_n_agents != prev_n_agents:
+                    print(f"[CURRICULUM] n_agents={next_n_agents} @ episode {ep+1}/{args.episodes}")
+                    prev_n_agents = next_n_agents
 
             for block_i in range(target_rollout_eps):
                 if args.env_source == "pkl":
@@ -760,20 +778,19 @@ def train_mappo(args, checkpoint_path: Path, tb_logger=None) -> Path:
                 bar.update(1)
 
                 ep += 1
+                act_hist = {i: int(episode["action_hist"][i].item()) for i in range(5)}
                 print(
-                    format_console_row(
-                        "train",
-                        "mappo",
-                        epoch=f"{epoch + 1}/{args.train_epochs}",
-                        ep=f"{ep}/{args.episodes}",
-                        steps=int(episode["steps"]),
-                        done=f"{ep_done}/{n_agents_ep}",
-                        done50=recent_done_50,
+                    format_episode_compact(
+                        "TRAIN",
+                        episode=ep,
+                        total=args.episodes,
+                        done=ep_done,
+                        n_agents=n_agents_ep,
                         rew=ep_reward,
-                        p_loss=last_update_stats["p_loss"],
-                        v_loss=last_update_stats["v_loss"],
-                        entropy=last_update_stats["entropy"],
+                        steps=int(episode["steps"]),
                         approx_kl=last_update_stats["approx_kl"],
+                        entropy=last_update_stats["entropy"],
+                        acts=act_hist,
                     )
                 )
 
@@ -858,6 +875,8 @@ def train_mappo(args, checkpoint_path: Path, tb_logger=None) -> Path:
                 max_grad_norm=5.0,
                 target_kl=float(args.mappo_target_kl),
                 kl_stop_factor=float(args.mappo_kl_stop_factor),
+                epoch=epoch + 1,
+                total_epochs=args.train_epochs,
             )
             if update_stats is None:
                 continue

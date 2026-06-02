@@ -25,9 +25,56 @@ from utils.env_factory import (
     list_pkl_dataset,
     write_pkl_metadata_index,
 )
-from utils.progress import RollingDoneRatio, format_console_row, make_progress_bar
+from utils.progress import RollingDoneRatio, format_console_row, format_episode_compact, make_progress_bar
 from utils.outcome_reward import build_outcome_reward
 from utils.tb_logger import TBLogger, format_args_text
+
+
+def parse_curriculum_spec(spec: str | None, mode: str = "auto") -> list[int] | None:
+    """
+    Parse curriculum specification.
+    
+    Formats:
+    - "5" (repeat mode): return [5] (to be repeated by --curriculum-repeat)
+    - "3x10,5x10,7x5" (sequence mode): return [3]*10 + [5]*10 + [7]*5
+    - None: return None
+    
+    Args:
+        spec: Curriculum spec string
+        mode: "repeat", "sequence", or "auto" to detect
+    
+    Returns:
+        List of agent counts or None
+    """
+    if spec is None:
+        return None
+    
+    # Try to detect sequence mode (contains 'x' and ',')
+    is_sequence = 'x' in spec and (',' in spec or spec.count('x') > 0)
+    
+    if mode == "auto":
+        mode = "sequence" if is_sequence else "repeat"
+    
+    if mode == "repeat":
+        # Just return the single value as list
+        return [int(spec.strip())]
+    
+    if mode == "sequence":
+        # Parse "3x10,5x10,7x5" → [3]*10 + [5]*10 + [7]*5
+        result = []
+        for part in spec.split(','):
+            part = part.strip()
+            if 'x' in part:
+                count_str, repeat_str = part.split('x')
+                count = int(count_str.strip())
+                repeat = int(repeat_str.strip())
+                result.extend([count] * repeat)
+            else:
+                # Plain number, treat as 1x
+                result.append(int(part))
+        return result
+    
+    raise ValueError(f"Unknown curriculum mode: {mode}")
 
 
 @dataclass
@@ -435,6 +482,24 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--pkl-seed-start", type=int, default=1000)
     parser.add_argument("--pkl-overwrite", action="store_true")
     parser.add_argument("--agent-curriculum", nargs="+", type=int, default=None)
+    parser.add_argument(
+        "--curriculum-spec",
+        type=str,
+        default=None,
+        help="Curriculum specification: '5' (repeat once) or '3x10,5x10' (sequence: 10x3 agents, 10x5 agents)",
+    )
+    parser.add_argument(
+        "--curriculum-mode",
+        choices=["auto", "repeat", "sequence"],
+        default="auto",
+        help="How to interpret --curriculum-spec: auto=detect, repeat=single value, sequence=AxN,BxN format",
+    )
+    parser.add_argument(
+        "--curriculum-repeat",
+        type=int,
+        default=None,
+        help="When using --curriculum-spec in repeat mode, repeat this many times (e.g. --curriculum-spec 5 --curriculum-repeat 10 → [5]*10)",
+    )
     parser.add_argument("--pkl-num-envs-per-agent", type=int, default=5)
     parser.add_argument("--prepare-pkls", action="store_true")
     parser.add_argument("--prepare-only", action="store_true")
@@ -493,6 +558,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_parser().parse_args()
+
+    # Parse curriculum specification
+    if args.curriculum_spec:
+        curriculum = parse_curriculum_spec(args.curriculum_spec, mode=args.curriculum_mode)
+        if args.curriculum_mode == "repeat" or (args.curriculum_mode == "auto" and "x" not in args.curriculum_spec):
+            # Repeat mode: expand by curriculum_repeat count (default 1)
+            repeat_count = args.curriculum_repeat if args.curriculum_repeat else 1
+            curriculum = curriculum * repeat_count
+        args.agent_curriculum = curriculum
 
     maybe_prepare_pkl_dataset(args)
     if args.prepare_only:

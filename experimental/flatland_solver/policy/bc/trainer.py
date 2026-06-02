@@ -11,7 +11,7 @@ from policy.dla.policy import DLAPolicy
 from utils.action_utils import normalize_actions
 from utils.env_factory import SolverConfig, build_env, build_env_from_pkl, list_pkl_dataset
 from utils.model_utils import ActorCriticNet, infer_obs_dim, split_obs_and_mask
-from utils.progress import RollingDoneRatio, format_console_row, make_progress_bar
+from utils.progress import RollingDoneRatio, format_console_row, format_episode_compact, make_progress_bar
 
 
 def train_bc(args, checkpoint_path: Path, tb_logger=None) -> Path:
@@ -253,9 +253,15 @@ def train_bc_from_dataset(args, checkpoint_path: Path, tb_logger=None) -> Path:
 
         avg_loss = sum(losses) / max(1, len(losses))
         acc = correct / max(1, total)
-        print(f"[BC] Epoch {epoch + 1}/{args.train_epochs}  loss={avg_loss:.4f}  acc={acc:.3f}")
-        print(format_console_row("epoch", "bc-offline", epoch=f"{epoch + 1}/{args.train_epochs}",
-                                 avg_loss=avg_loss, acc=acc, n_samples=n_samples))
+        print(
+            format_episode_compact(
+                "BC",
+                episode=epoch + 1,
+                total=args.train_epochs,
+                loss=avg_loss,
+                acc=acc,
+            )
+        )
         if tb_logger is not None:
             tb_logger.log_bc_epoch(epoch + 1, avg_loss=avg_loss, accuracy=acc)
 

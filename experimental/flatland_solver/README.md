@@ -65,6 +65,12 @@ python main.py --mode train --policy bc --env-source pkl --pkl-dir pkl_envs --ep
 python main.py --mode train --policy mappo --episodes 2 --train-epochs 1
 python main.py --mode eval --policy mappo --episodes 2
 
+# MAPPO with curriculum (repeat mode: same agent count)
+python main.py --mode train --policy mappo --curriculum-spec 5 --curriculum-repeat 10 --episodes 10 --train-epochs 1
+
+# MAPPO with curriculum (sequence mode: varying agent counts)
+python main.py --mode train --policy mappo --curriculum-spec 1x5,5x5 --episodes 10 --train-epochs 1
+
 # MAPPO diagnostics from legacy doc guidance (entropy / approx_kl)
 python main.py --mode train --policy mappo --env-source pkl --pkl-dir pkl_envs --episodes 3 --train-epochs 2 --debug-checks
 
@@ -193,6 +199,73 @@ python main.py --mode eval --policy bc --env-source pkl \
 ```
 
 The agent curriculum approach creates robust policies that generalize across agent counts without needing curriculum sampling during training—all agent-counts are mixed in each epoch.
+
+## Curriculum Selection: Repeat vs. Sequence Mode
+
+Training can use **agent curriculum** to expose policies to varying agent counts. Two modes are supported:
+
+### Repeat Mode (Single Agent Count)
+
+Repeat a fixed agent count across training episodes:
+
+```bash
+# Train with 5-agent environments only, repeated 10 times
+python main.py --mode train --policy mappo \
+  --curriculum-spec 5 --curriculum-repeat 10 \
+  --episodes 100
+
+# Shorthand: generates [5]*10 curriculum
+```
+
+Use this for **homogeneous** training (all episodes have same complexity).
+
+### Sequence Mode (Variable Agent Counts)
+
+Cycle through multiple agent counts in a controlled order:
+
+```bash
+# Curriculum: 10 episodes with 3 agents, then 10 with 5 agents, then 5 with 7 agents
+python main.py --mode train --policy mappo \
+  --curriculum-spec 3x10,5x10,7x5 \
+  --episodes 25
+
+# Generates [3]*10 + [5]*10 + [7]*5
+```
+
+Use this for **curriculum learning** (policy learns from simple→complex scenarios).
+
+### Curriculum Selection with PKL Datasets
+
+When combining with `--env-source pkl`:
+
+```bash
+# Generate variable-agent PKL cache
+python main.py --prepare-pkls --prepare-only \
+  --agent-curriculum 1 2 3 4 5 7 10 20 \
+  --pkl-num-envs-per-agent 25
+
+# Train with repeat mode (all PKLs, randomly selected)
+python main.py --mode train --policy mappo \
+  --env-source pkl --pkl-dir pkl_envs \
+  --curriculum-spec 5 --curriculum-repeat 20 \
+  --episodes 100
+
+# Train with sequence mode (curriculum marker printed at transitions)
+python main.py --mode train --policy mappo \
+  --env-source pkl --pkl-dir pkl_envs \
+  --curriculum-spec 1x10,3x10,5x10,10x10 \
+  --episodes 40
+```
+
+During sequence-mode training, curriculum transitions are marked in output:
+
+```
+[CURRICULUM] n_agents=1 @ episode 1/40
+[TRAIN] ep=1/40 (2%) done=50% reward=+15.30 ...
+...
+[CURRICULUM] n_agents=3 @ episode 11/40
+[TRAIN] ep=11/40 (27%) done=75% reward=+25.10 ...
+```
 
 ## DLA Record -> Offline BC -> MAPPO Warmstart
 
@@ -371,3 +444,128 @@ RECORD_EPISODES=100 BC_EPOCHS=10 MAPPO_EPISODES=120 ./run_legacy_migration_pipel
 - Flatland may print "Line Generator should not have random state." This warning is non-fatal for these workflows.
 - If `tensorboard` fails with `ModuleNotFoundError: No module named 'pkg_resources'`, install a compatible setuptools version: `python -m pip install "setuptools<81"`.
 - BC uses DLA as expert; DLA is reinitialized per episode to avoid stale internal maps when cycling through many PKL files.
+
+## Output Format & Logging
+
+Training and evaluation outputs are designed for readability and debugging:
+
+### Episode Format
+
+Each episode produces a **single-line output (≤210 characters)**:
+
+```
+[TRAIN] ep=42/100 (42%) done=100% reward=+55.20 loss=0.234 kl=0.015 ent=1.523 actions=[pick=120 move=85 ...] samples=1024 steps=45
+[BC] ep=5/10 (50%) done=75% reward=+30.10 loss=0.089 samples=256 steps=23
+[REC] ep=15/200 (7%) done=50% reward=+10.50 loss=0.156 actions=[...] steps=60
+[EVAL] ep=1/20 (5%) done=100% reward=+50.00 steps=42
+```
+
+Metrics included:
+- `ep=X/Y (P%)`: Episode number and percentage complete
+- `done=%`: Completion rate (% of agents that reached destination)
+- `reward=±X.XX`: Total reward (shaped per episode)
+- `loss=X.XXX`: Policy loss (BC/MAPPO)
+- `kl=X.XXX`: KL divergence (MAPPO only)
+- `ent=X.XXX`: Entropy (MAPPO only)
+- `actions=[...]`: Action histogram (top 3 actions)
+- `samples=N`: Batch samples collected
+- `steps=N`: Episode length
+
+### PPO Update Format
+
+MAPPO training prints one line per **PPO update batch**:
+
+```
+[PPO] ep=1 (1/1) batch_1/4 samples=1024 kl=+0.018 ratio=1.05 p_loss=0.234 v_loss=0.089 clip=0.12 ent=1.52
+[PPO] ep=1 (1/1) batch_2/4 samples=1024 kl=+0.022 ratio=1.04 p_loss=0.210 v_loss=0.095 clip=0.08 ent=1.51
+[PPO] ep=1 (1/1) batch_3/4 samples=1024 kl=-0.003 ratio=0.98 p_loss=0.189 v_loss=0.082 clip=0.02 ent=1.50
+[PPO] ep=1 (1/1) batch_4/4 samples=1024 kl=+0.015 ratio=1.02 p_loss=0.201 v_loss=0.088 clip=0.05 ent=1.49
+```
+
+Metrics:
+- `ep=X (N/T)`: Epoch and update block index
+- `batch_N/T`: Minibatch within PPO epoch
+- `kl=±X.XXX`: Approximate KL divergence
+- `ratio=X.XX`: Mean importance-sampling ratio
+- `p_loss=X.XXX`: Policy loss
+- `v_loss=X.XXX`: Value loss
+- `clip=X.XX`: Clipping fraction
+- `ent=X.XX`: Entropy
+
+### Curriculum Markers
+
+When using sequence-mode curriculum, transitions between agent counts are marked:
+
+```
+[CURRICULUM] n_agents=1 @ episode 1/100
+[CURRICULUM] n_agents=5 @ episode 11/100
+[CURRICULUM] n_agents=10 @ episode 21/100
+```
+
+## Output Metrics in TensorBoard & Console
+
+Standard metrics logged to TensorBoard:
+
+- **TRAIN**: `episode/reward`, `episode/done_rate`, `episode/steps`, `ppo/p_loss`, `ppo/v_loss`, `ppo/entropy`, `ppo/approx_kl`
+- **EVAL**: `eval/done_rate`, `eval/avg_reward`, `eval/avg_steps`, `eval/deadlock_rate`
+- **BC**: `bc/loss`, `bc/accuracy`
+
+## CLI Reference: Curriculum & Training Flags
+
+### Curriculum Control
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--curriculum-spec` | `str` | `None` | Curriculum spec: `"5"` (repeat) or `"3x10,5x10"` (sequence) |
+| `--curriculum-mode` | `{auto,repeat,sequence}` | `auto` | How to parse `--curriculum-spec` |
+| `--curriculum-repeat` | `int` | `None` | Repeat count for repeat mode (e.g., `5` + repeat 10 → [5]*10) |
+| `--agent-curriculum` | `int [int ...]` | `None` | Legacy: list agent counts directly (e.g., `--agent-curriculum 1 2 3 5`) |
+
+### MAPPO Training Control
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--mappo-rollout-episodes` | `int` | `10` | Episodes to collect before PPO update block |
+| `--mappo-ppo-epochs` | `int` | `4` | PPO epochs per update block |
+| `--mappo-batch-size` | `int` | `256` | Mini-batch size for PPO updates |
+| `--mappo-entropy-coef` | `float` | `0.02` | Entropy regularization coefficient |
+| `--mappo-value-coef` | `float` | `0.5` | Value loss coefficient |
+| `--mappo-clip-eps` | `float` | `0.2` | PPO clipping epsilon |
+| `--mappo-target-kl` | `float` | `0.05` | Target KL for early-stop guard |
+| `--mappo-kl-stop-factor` | `float` | `1.5` | Early-stop threshold multiplier |
+| `--mappo-mid-eval-every` | `int` | `0` | Run mid-training eval every N collected episodes |
+| `--mappo-mid-eval-episodes` | `int` | `10` | Episodes per mid/final eval run |
+
+### Environment & Observation
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--obs-variant` | `{fast_tree,decision_point,spawn_aware,conflict_aware}` | `fast_tree` | Observation variant for policies |
+| `--obs` | (alias) | — | Legacy alias for `--obs-variant` |
+| `--env-source` | `{generated,pkl}` | `generated` | Environment source (on-the-fly or pre-cached) |
+| `--pkl-dir` | `Path` | `generated_envs` | Directory for PKL cache |
+| `--pkl-count` | `int` | `32` | Number of PKL environments to generate |
+| `--max-episode-steps` | `int` | `300` | Max steps per episode |
+
+### Reward Shaping
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--disable-outcome-reward` | `flag` | `False` | Disable legacy outcome-based reward shaping |
+
+Example with all curriculum + MAPPO settings:
+
+```bash
+python main.py --mode train --policy mappo \
+  --env-source pkl --pkl-dir pkl_envs \
+  --curriculum-spec 1x10,3x20,5x30 \
+  --episodes 60 --train-epochs 3 \
+  --mappo-rollout-episodes 10 \
+  --mappo-ppo-epochs 4 \
+  --mappo-batch-size 256 \
+  --mappo-entropy-coef 0.02 \
+  --mappo-value-coef 0.5 \
+  --mappo-target-kl 0.05 \
+  --mappo-mid-eval-every 30 \
+  --obs-variant spawn_aware
+```
