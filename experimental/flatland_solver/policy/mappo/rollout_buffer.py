@@ -4,7 +4,7 @@ from typing import Dict, List
 
 
 class RolloutBuffer:
-    """Legacy-compatible rollout buffer container."""
+    """Rollout buffer container for MAPPO training."""
 
     def __init__(self):
         self.data: Dict[int, List[tuple]] = {}

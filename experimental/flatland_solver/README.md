@@ -91,16 +91,10 @@ python main.py --mode train --policy mappo --env-source pkl --pkl-dir generated_
 # tensorboard (runs include mode/policy/params in folder name)
 tensorboard --logdir runs
 
-# legacy observation variants from flatland_minimal_project_NOT_WORKING_TRANSFORM
+# integrated observation variants
 python main.py --mode train --policy bc --obs-variant decision_point --episodes 2 --train-epochs 1
 python main.py --mode train --policy mappo --obs-variant spawn_aware --episodes 2 --train-epochs 1
 python main.py --mode eval --policy mappo --obs-variant conflict_aware --episodes 1
-
-# extract KPI hints from legacy PDF
-python tools/pdf_kpi_digest.py \
-  --pdf ../flatland_minimal_project_NOT_WORKING_TRANSFORM/2026_05_FLATLAND_MARL_EXPERIMENT.pdf \
-  --out-md runs/legacy_kpi_digest.md \
-  --out-txt runs/legacy_kpi_raw.txt
 ```
 
 Each run creates a folder like:
@@ -123,10 +117,6 @@ Observation variants (`--obs-variant`) for BC/MAPPO:
 
 Models now infer and store `obs_dim` in checkpoints, so BC/MAPPO can train/eval across these variants.
 On Flatland 4.2.5, `conflict_aware` may print repeated DLA helper warnings from legacy internals; training/eval still proceeds.
-
-The legacy PDF in `../flatland_minimal_project_NOT_WORKING_TRANSFORM/`
-is treated as guidance for diagnostics and KPI tracking. The utility script above
-creates a searchable digest so KPI terms and baseline claims are visible in one place.
 
 ## 15-20 Min Validation Flow
 
@@ -436,23 +426,29 @@ All output (progress bars, metrics, TensorBoard logs) is displayed live in the c
 
 If you prefer a faster smoke test, run the **15-20 Min Validation Flow** above instead.
 
-## Legacy Migration Pipeline (Auto PKL + Optional BC Warmstart)
+## End-to-End Pipeline (Auto PKL + Optional BC Warmstart)
 
-For the exact flow you described (generate scenarios if missing, DLA demo collect,
-BC train from demos, optional BC warmstart into MAPPO, checkpoints + eval, full
-console and TensorBoard logging), use:
+For the full flow (generate scenarios if missing, DLA demo collect,
+BC train from demos, optional BC warmstart into MAPPO, checkpoints + eval,
+full console and TensorBoard logging), run these commands directly:
 
 ```bash
 cd experimental/flatland_solver
 
-# Default: with BC warmstart
-./run_legacy_migration_pipeline.sh
+# 1) Build PKL scenarios (only if missing)
+python main.py --prepare-pkls --prepare-only --pkl-dir generated_envs --pkl-count 32 --pkl-seed-start 1000
 
-# MAPPO-only path (no BC record/train, no BC warmstart)
-./run_legacy_migration_pipeline.sh --without-bc
+# 2) Record DLA demonstrations
+python main.py --mode record --env-source pkl --pkl-dir generated_envs --episodes 200 --max-episode-steps 300
 
-# Legacy observation perf/debug reports (ObsFnPerf, feature reports)
-LEGACY_OBS_DEBUG=1 LEGACY_OBS_SEARCH_DEPTH=4 ./run_legacy_migration_pipeline.sh
+# 3) Train BC offline from recorded dataset
+python main.py --mode train --policy bc --dataset-path datasets/dla_dataset.pt --env-source pkl --pkl-dir generated_envs --episodes 200 --train-epochs 5 --obs-variant decision_point
+
+# 4) Train MAPPO with optional BC warmstart
+python main.py --mode train --policy mappo --init-checkpoint checkpoints/bc.pt --env-source pkl --pkl-dir generated_envs --episodes 200 --train-epochs 5 --obs-variant spawn_aware
+
+# 5) Evaluate MAPPO
+python main.py --mode eval --policy mappo --env-source pkl --pkl-dir generated_envs --episodes 20 --obs-variant spawn_aware
 ```
 
 Default generated scenario directory is now `generated_envs/` (old `pkl_envs/`
@@ -467,11 +463,7 @@ What this script does:
 5. Saves MAPPO checkpoint and runs eval (and BC eval when BC is enabled).
 6. Logs everything to console + TensorBoard (`runs/`).
 
-You can override key run lengths via environment variables, for example:
-
-```bash
-RECORD_EPISODES=100 BC_EPOCHS=10 MAPPO_EPISODES=120 ./run_legacy_migration_pipeline.sh
-```
+You can shorten run lengths by reducing `--episodes`, `--train-epochs`, and `--max-episode-steps` in the commands above.
 
 ## Troubleshooting
 

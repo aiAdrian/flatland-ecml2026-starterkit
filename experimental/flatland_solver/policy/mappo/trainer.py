@@ -115,7 +115,7 @@ def _legal_action_mask(base_obs: np.ndarray, agent) -> np.ndarray:
     return mask
 
 
-def _forward_legacy(
+def _forward_structured(
     base_encoder: BaseFeatureEncoder,
     tree_encoder: TreePayloadEncoder,
     fuse: torch.nn.Module,
@@ -174,7 +174,7 @@ def _collect_episode(
             mask_t = torch.from_numpy(mask_np).float().unsqueeze(0).to(device)
 
             with torch.no_grad():
-                logits, value = _forward_legacy(base_encoder, tree_encoder, fuse, head, base_t, [payload], pool_t)
+                logits, value = _forward_structured(base_encoder, tree_encoder, fuse, head, base_t, [payload], pool_t)
                 logits = logits.masked_fill(mask_t < 0.5, float("-inf"))
                 dist = Categorical(logits=logits)
                 action_t = dist.sample()
@@ -369,7 +369,7 @@ def _ppo_update(
             b_ret = batch["ret"][mb]
             b_mask = batch["mask"][mb]
 
-            logits, values = _forward_legacy(base_encoder, tree_encoder, fuse, head, b_base, b_payload, b_pool)
+            logits, values = _forward_structured(base_encoder, tree_encoder, fuse, head, b_base, b_payload, b_pool)
             logits = logits.masked_fill(b_mask < 0.5, float("-inf"))
             dist = Categorical(logits=logits)
             lp = dist.log_prob(b_act)
@@ -511,7 +511,7 @@ def _eval_model(
                 mask_t = torch.from_numpy(mask_np).float().unsqueeze(0).to(device)
 
                 with torch.no_grad():
-                    logits, _ = _forward_legacy(base_encoder, tree_encoder, fuse, head, base_t, [payload], pool_t)
+                    logits, _ = _forward_structured(base_encoder, tree_encoder, fuse, head, base_t, [payload], pool_t)
                     logits = logits.masked_fill(mask_t < 0.5, float("-inf"))
                     if greedy:
                         action = int(torch.argmax(logits, dim=-1).item())
@@ -563,7 +563,7 @@ def _save_checkpoint(
             "optimizer": optimizer.state_dict(),
             "hidden": 64,
             "base_dim": base_dim,
-            "kind": "mappo_legacy",
+            "kind": "mappo_structured",
         },
         checkpoint_path,
     )
@@ -627,9 +627,9 @@ def train_mappo(args, checkpoint_path: Path, tb_logger=None) -> Path:
             fuse.load_state_dict(payload["fuse"], strict=False)
             head.load_state_dict(payload["head"], strict=False)
             warmstart_used = True
-            print(f"[train-mappo] warmstart(legacy)={args.init_checkpoint}")
+            print(f"[train-mappo] warmstart(structured)={args.init_checkpoint}")
         elif "model_state" in payload:
-            print("[train-mappo] init-checkpoint is compact BC/ActorCritic format; legacy warmstart skipped.")
+            print("[train-mappo] init-checkpoint is compact BC/ActorCritic format; structured warmstart skipped.")
 
     print(
         format_console_row(

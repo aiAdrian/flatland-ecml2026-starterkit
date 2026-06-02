@@ -5,7 +5,7 @@ import torch.nn as nn
 
 
 class BaseFeatureEncoder(nn.Module):
-    """Legacy MAPPO base-feature encoder (22D -> hidden)."""
+    """MAPPO base-feature encoder (22D -> hidden)."""
 
     def __init__(self, base_dim: int = 22, hidden: int = 64):
         super().__init__()

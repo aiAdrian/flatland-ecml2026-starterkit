@@ -21,7 +21,7 @@ class MAPPOPolicy(RailEnvPolicy[Any, Any, RailEnvActions]):
 
     Supports both:
     - compact checkpoint format (`model_state` from ActorCriticNet)
-    - legacy checkpoint format (`base_encoder`, `tree_encoder`, `fuse`, `head`)
+    - structured checkpoint format (`base_encoder`, `tree_encoder`, `fuse`, `head`)
     """
 
     def __init__(self, seed: int = 42, checkpoint_path: str | None = None):
@@ -34,7 +34,7 @@ class MAPPOPolicy(RailEnvPolicy[Any, Any, RailEnvActions]):
         self.model = ActorCriticNet(obs_dim=self.obs_dim, action_dim=self.action_size)
         self.model.eval()
 
-        # Legacy path.
+        # Structured module-state path.
         self.base_dim = 22
         self.hidden = 64
         self.base_encoder: BaseFeatureEncoder | None = None
@@ -43,7 +43,7 @@ class MAPPOPolicy(RailEnvPolicy[Any, Any, RailEnvActions]):
         self.head: ActorCriticHead | None = None
 
         self.loaded = False
-        self.mode = "compact"  # or "legacy"
+        self.mode = "compact"  # or "structured"
 
         if checkpoint_path:
             path = Path(checkpoint_path)
@@ -78,7 +78,7 @@ class MAPPOPolicy(RailEnvPolicy[Any, Any, RailEnvActions]):
                     self.tree_encoder.eval()
                     self.fuse.eval()
                     self.head.eval()
-                    self.mode = "legacy"
+                    self.mode = "structured"
                     self.loaded = True
 
     @staticmethod
@@ -132,7 +132,7 @@ class MAPPOPolicy(RailEnvPolicy[Any, Any, RailEnvActions]):
             mask[:] = 1.0
         return mask
 
-    def _legacy_forward_logits(self, observation: Any) -> torch.Tensor:
+    def _structured_forward_logits(self, observation: Any) -> torch.Tensor:
         assert self.base_encoder is not None and self.tree_encoder is not None and self.fuse is not None and self.head is not None
         base_obs, opps, payload = self._unwrap_state(observation)
         if base_obs.shape[0] < self.base_dim:
@@ -158,8 +158,8 @@ class MAPPOPolicy(RailEnvPolicy[Any, Any, RailEnvActions]):
         return {h: self.act(observations[idx]) for idx, h in enumerate(handles)}
 
     def act(self, observation: Any, **kwargs) -> RailEnvActions:
-        if self.mode == "legacy" and self.loaded:
-            logits = self._legacy_forward_logits(observation)
+        if self.mode == "structured" and self.loaded:
+            logits = self._structured_forward_logits(observation)
             action = int(torch.argmax(logits).item())
             return RailEnvActions(action)
 

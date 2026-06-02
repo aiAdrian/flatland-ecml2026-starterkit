@@ -9,7 +9,7 @@ import torch.nn as nn
 
 
 class TreePayloadEncoder(nn.Module):
-    """Legacy-style tree payload encoder (node/edge message passing)."""
+    """Structured tree payload encoder (node/edge message passing)."""
 
     NODE_DIM = 12
     EDGE_DIM = 20

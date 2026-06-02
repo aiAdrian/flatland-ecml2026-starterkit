@@ -5,7 +5,7 @@ import torch.nn as nn
 
 
 class ActorCriticHead(nn.Module):
-    """Legacy MAPPO actor+critic head with neighbor-pool critic input."""
+    """MAPPO actor+critic head with neighbor-pool critic input."""
 
     def __init__(self, hidden: int, action_size: int, base_dim: int):
         super().__init__()
