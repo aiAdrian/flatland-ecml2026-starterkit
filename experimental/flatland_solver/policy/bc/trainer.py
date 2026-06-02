@@ -10,8 +10,8 @@ from policy.dla.observation import DLAFullEnvObservation
 from policy.dla.policy import DLAPolicy
 from utils.action_utils import normalize_actions
 from utils.env_factory import SolverConfig, build_env, build_env_from_pkl, list_pkl_dataset
-from utils.model_utils import DiscretePolicyNet, infer_obs_dim, split_obs_and_mask
-from utils.progress import RollingDoneRatio, format_console_row, format_fixed_metrics, make_progress_bar
+from utils.model_utils import ActorCriticNet, infer_obs_dim, split_obs_and_mask
+from utils.progress import RollingDoneRatio, format_console_row, make_progress_bar
 
 
 def train_bc(args, checkpoint_path: Path, tb_logger=None) -> Path:
@@ -43,8 +43,22 @@ def train_bc(args, checkpoint_path: Path, tb_logger=None) -> Path:
     else:
         first_obs = probe_obs[0]
     obs_dim = infer_obs_dim(first_obs, default=36)
-    model = DiscretePolicyNet(obs_dim=obs_dim, action_dim=5)
+    model = ActorCriticNet(obs_dim=obs_dim, action_dim=5)
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)
+
+    print(
+        format_console_row(
+            "config",
+            "bc-online",
+            epochs=args.train_epochs,
+            episodes=args.episodes,
+            lr=args.lr,
+            obs=args.obs_variant,
+            env_source=args.env_source,
+            pkl_dir=str(args.pkl_dir),
+            max_steps=args.max_episode_steps,
+        )
+    )
 
     for epoch in range(args.train_epochs):
         losses = []
@@ -96,7 +110,7 @@ def train_bc(args, checkpoint_path: Path, tb_logger=None) -> Path:
                         labels_forced_valid += 1
                     mask_t[i, label_t[i]] = 1.0
 
-                logits = model(feat_t)
+                logits, _ = model(feat_t)
                 logits = logits.masked_fill(mask_t < 0.5, float("-inf"))
                 loss = F.cross_entropy(logits, label_t)
 
@@ -168,16 +182,42 @@ def train_bc_from_dataset(args, checkpoint_path: Path, tb_logger=None) -> Path:
     masks: torch.Tensor = data["masks"]
     labels: torch.Tensor = data["labels"]
     obs_dim: int = int(data.get("obs_dim", 36))
+    obs_variant = str(data.get("obs_variant", getattr(args, "obs_variant", "unknown")))
     n_samples = feats.shape[0]
 
+    batch_size = getattr(args, "batch_size", 256)
     print(format_console_row("dataset", "bc", path=str(dataset_path),
                              n_samples=n_samples, obs_dim=obs_dim))
+    print(
+        format_console_row(
+            "config",
+            "bc-offline",
+            epochs=args.train_epochs,
+            batch_size=batch_size,
+            lr=args.lr,
+            obs=obs_variant,
+        )
+    )
 
-    model = DiscretePolicyNet(obs_dim=obs_dim, action_dim=5)
+    model = ActorCriticNet(obs_dim=obs_dim, action_dim=5)
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)
 
-    batch_size = getattr(args, "batch_size", 256)
-    indices = torch.arange(n_samples)
+    # Legacy BC behavior: drop demos where expert action is illegal under mask.
+    legal_for_expert = masks[torch.arange(n_samples), labels] > 0.5
+    keep = torch.nonzero(legal_for_expert, as_tuple=False).reshape(-1)
+    if int(keep.numel()) < int(n_samples):
+        print(f"[BC] Filtered {n_samples - int(keep.numel())}/{n_samples} demos with illegal expert actions.")
+    if int(keep.numel()) == 0:
+        print("[BC] No valid demos after filtering.")
+        return checkpoint_path
+
+    feats = feats[keep]
+    masks = masks[keep]
+    labels = labels[keep]
+    n_samples = int(feats.shape[0])
+
+    print(f"[BC] Training on {n_samples} demos for {args.train_epochs} epochs (batch={batch_size})...")
+
 
     for epoch in range(args.train_epochs):
         # Shuffle each epoch
@@ -189,17 +229,15 @@ def train_bc_from_dataset(args, checkpoint_path: Path, tb_logger=None) -> Path:
         losses = []
         correct = 0
         total = 0
-        bar = make_progress_bar(
-            total=(n_samples + batch_size - 1) // batch_size,
-            desc=f"BC-offline[{epoch + 1}/{args.train_epochs}]",
-        )
-
         for start in range(0, n_samples, batch_size):
-            feat_t = feats_s[start:start + batch_size]
-            mask_t = masks_s[start:start + batch_size]
-            label_t = labels_s[start:start + batch_size]
+            end = start + batch_size
+            feat_t = feats_s[start:end]
+            mask_t = masks_s[start:end]
+            label_t = labels_s[start:end]
+            if int(label_t.shape[0]) < 4:
+                continue
 
-            logits = model(feat_t)
+            logits, _ = model(feat_t)
             logits = logits.masked_fill(mask_t < 0.5, float("-inf"))
             loss = F.cross_entropy(logits, label_t)
 
@@ -212,11 +250,10 @@ def train_bc_from_dataset(args, checkpoint_path: Path, tb_logger=None) -> Path:
             loss.backward()
             opt.step()
             losses.append(float(loss.item()))
-            bar.update(1)
 
-        bar.close()
         avg_loss = sum(losses) / max(1, len(losses))
         acc = correct / max(1, total)
+        print(f"[BC] Epoch {epoch + 1}/{args.train_epochs}  loss={avg_loss:.4f}  acc={acc:.3f}")
         print(format_console_row("epoch", "bc-offline", epoch=f"{epoch + 1}/{args.train_epochs}",
                                  avg_loss=avg_loss, acc=acc, n_samples=n_samples))
         if tb_logger is not None:

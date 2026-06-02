@@ -50,7 +50,7 @@ def _ensure_legacy_obs_path() -> None:
         sys.path.insert(0, legacy_path)
 
 
-def MAPPOObservationBuilder(obs_variant: str = "fast_tree"):
+def MAPPOObservationBuilder(obs_variant: str = "fast_tree", debug: bool = False, search_depth: int = 4):
     obs_variant = str(obs_variant).lower()
 
     if obs_variant == "fast_tree":
@@ -74,14 +74,18 @@ def MAPPOObservationBuilder(obs_variant: str = "fast_tree"):
     if obs_variant == "decision_point":
         from marl_attention_temporal_observation.decision_point_observation import DecisionPointObservation
 
-        return _compat(DecisionPointObservation)(debug=False, search_depth=4)
+        return _compat(DecisionPointObservation)(debug=bool(debug), search_depth=int(search_depth))
     if obs_variant == "spawn_aware":
         from marl_attention_temporal_observation.spawn_aware_observation import SpawnAwareObservation
 
-        return _compat(SpawnAwareObservation)(debug=False, search_depth=4)
+        return _compat(SpawnAwareObservation)(debug=bool(debug), search_depth=int(search_depth))
     if obs_variant == "conflict_aware":
         from marl_attention_temporal_observation.conflict_aware_observation import ConflictAwareObservation
 
-        return _compat(ConflictAwareObservation)(debug=False, search_depth=4, verbose_first_call=False)
+        return _compat(ConflictAwareObservation)(
+            debug=bool(debug),
+            search_depth=int(search_depth),
+            verbose_first_call=bool(debug),
+        )
 
     raise ValueError(f"Unsupported --obs-variant for MAPPO: {obs_variant}")

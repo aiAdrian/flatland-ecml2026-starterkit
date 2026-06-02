@@ -6,6 +6,7 @@ to a .pt dataset file for offline BC training.
 from __future__ import annotations
 
 from pathlib import Path
+import time
 
 import torch
 from flatland.envs.step_utils.states import TrainState
@@ -20,7 +21,11 @@ from utils.progress import RollingDoneRatio, format_console_row, make_progress_b
 
 def record_dla_dataset(args, dataset_path: Path) -> Path:
     """Run DLA on all PKL environments (or generated envs) and save dataset."""
-    obs_builder = BCObservationBuilder(obs_variant=args.obs_variant)
+    obs_builder = BCObservationBuilder(
+        obs_variant=args.obs_variant,
+        debug=bool(getattr(args, "legacy_obs_debug", False)),
+        search_depth=int(getattr(args, "legacy_obs_search_depth", 4)),
+    )
     cfg = SolverConfig(
         width=args.width,
         height=args.height,
@@ -39,6 +44,26 @@ def record_dla_dataset(args, dataset_path: Path) -> Path:
         env = build_env(cfg=cfg, obs_builder=obs_builder)
     else:
         env = build_env_from_pkl(pkl_files[0], obs_builder=obs_builder)
+        print(f"Load environments from disk. # {len(pkl_files):3d} loaded.")
+
+    print(
+        format_console_row(
+            "config",
+            "record",
+            expert="dla",
+            episodes=args.episodes,
+            max_steps=args.max_episode_steps,
+            obs=args.obs_variant,
+            env_source=args.env_source,
+            pkl_dir=str(args.pkl_dir),
+        )
+    )
+
+    # Legacy-like recorder context lines for consistency with train_marl.py UX.
+    print(">> DLARecordingWrapper")
+    print(">> DeadLockAvoidancePolicy")
+    print(">> DeadLockAvoidancePolicy")
+    print("[reward] Using OutcomeBasedReward (step=-1, deadlock=-5, done=+50+saved, all_done=+100, fail=-200, scale=0.01)")
 
     # Probe obs_dim from first env (Flatland reset may return dict or list-like)
     probe_obs, _ = env.reset(random_seed=args.seed)
@@ -51,10 +76,27 @@ def record_dla_dataset(args, dataset_path: Path) -> Path:
     all_feats: list[torch.Tensor] = []
     all_masks: list[torch.Tensor] = []
     all_labels: list[int] = []
+    total_candidate_samples = 0
+    kept_samples = 0
+
+    decision_point_only = str(args.obs_variant).lower() in {"decision_point", "spawn_aware", "conflict_aware"}
+    dp_utils = None
+    if decision_point_only:
+        try:
+            from marl_attention_temporal_observation.decision_point_utils import DecisionPointUtils
+
+            dp_utils = DecisionPointUtils
+        except Exception:
+            # Fallback: if legacy utility cannot be imported, keep all samples.
+            decision_point_only = False
 
     n_episodes = args.episodes
     rolling_done = RollingDoneRatio(window_size=20)
     bar = make_progress_bar(total=n_episodes, desc="Record[DLA]")
+
+    print(f"\n[DemoCollect] DLA x {n_episodes} episodes (decision-points only) ...")
+    print(f"[DemoCollect] starting ({n_episodes} iterations)")
+    t0 = time.perf_counter()
 
     for ep in range(n_episodes):
         if args.env_source == "pkl":
@@ -76,6 +118,17 @@ def record_dla_dataset(args, dataset_path: Path) -> Path:
 
             obs_batch = [observations[h] for h in handles]
             for h, obs in zip(handles, obs_batch):
+                total_candidate_samples += 1
+                if decision_point_only and dp_utils is not None:
+                    try:
+                        agent = env.agents[h]
+                        ctype = dp_utils.classify_cell_type(agent, env)
+                        if ctype not in ("SWITCH", "MERGING", "PRE_M"):
+                            continue
+                    except Exception:
+                        # Keep robust behavior under API mismatches.
+                        pass
+
                 f, m = split_obs_and_mask(obs, obs_dim=obs_dim)
                 label = norm_actions[h]
                 # Ensure label is valid within mask; fall back to 0 (DO_NOTHING) if needed
@@ -85,6 +138,7 @@ def record_dla_dataset(args, dataset_path: Path) -> Path:
                 all_masks.append(m)
                 all_labels.append(label)
                 ep_samples += 1
+                kept_samples += 1
 
             observations, _, done, _ = env.step(norm_actions)
             steps += 1
@@ -97,9 +151,17 @@ def record_dla_dataset(args, dataset_path: Path) -> Path:
         print(format_console_row("record", "dla", ep=f"{ep + 1}/{n_episodes}", steps=steps,
                                  done=f"{ep_done}/{env.get_num_agents()}", samples=ep_samples))
 
+        # Legacy-like periodic progress line (print each episode for full trace).
+        now = time.perf_counter()
+        elapsed_s = int(now - t0)
+        pct = 100.0 * float(ep + 1) / max(1, n_episodes)
+        print(f"[DemoCollect] {ep + 1:5d}/{n_episodes:<3d} ({pct:5.1f}%)  demos={len(all_labels)}  ({elapsed_s}s)")
+
     bar.close()
 
     dataset_path.parent.mkdir(parents=True, exist_ok=True)
+    if len(all_labels) == 0:
+        raise ValueError("No demos collected. Try increasing --episodes or disabling decision-point filtering.")
     dataset = {
         "feats": torch.stack(all_feats),
         "masks": torch.stack(all_masks),
@@ -109,6 +171,12 @@ def record_dla_dataset(args, dataset_path: Path) -> Path:
         "n_samples": len(all_labels),
     }
     torch.save(dataset, dataset_path)
+    elapsed = time.perf_counter() - t0
+    keep_rate = float(kept_samples) / max(1, int(total_candidate_samples))
+    if decision_point_only:
+        print(f"[DemoCollect] {len(all_labels)} demos in {elapsed:.1f}s (decision-point keep-rate={keep_rate:.1%})")
+    else:
+        print(f"[DemoCollect] {len(all_labels)} demos in {elapsed:.1f}s")
     print(format_console_row("record", "dla", dataset=str(dataset_path),
                              n_samples=len(all_labels), obs_dim=obs_dim))
     return dataset_path

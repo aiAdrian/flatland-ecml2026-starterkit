@@ -25,7 +25,8 @@ from utils.env_factory import (
     list_pkl_dataset,
     write_pkl_metadata_index,
 )
-from utils.progress import RollingDoneRatio, format_console_row, format_fixed_metrics, make_progress_bar
+from utils.progress import RollingDoneRatio, format_console_row, make_progress_bar
+from utils.outcome_reward import build_outcome_reward
 from utils.tb_logger import TBLogger, format_args_text
 
 
@@ -45,12 +46,20 @@ def make_policy_and_observation(args):
     if args.policy == "bc":
         return (
             BCPolicy(checkpoint_path=str(args.bc_checkpoint)),
-            BCObservationBuilder(obs_variant=args.obs_variant),
+            BCObservationBuilder(
+                obs_variant=args.obs_variant,
+                debug=bool(getattr(args, "legacy_obs_debug", False)),
+                search_depth=int(getattr(args, "legacy_obs_search_depth", 4)),
+            ),
         )
     if args.policy == "mappo":
         return (
             MAPPOPolicy(seed=args.seed, checkpoint_path=str(args.mappo_checkpoint)),
-            MAPPOObservationBuilder(obs_variant=args.obs_variant),
+            MAPPOObservationBuilder(
+                obs_variant=args.obs_variant,
+                debug=bool(getattr(args, "legacy_obs_debug", False)),
+                search_depth=int(getattr(args, "legacy_obs_search_depth", 4)),
+            ),
         )
     raise ValueError(f"Unsupported policy: {args.policy}")
 
@@ -70,6 +79,18 @@ def make_solver_config(args) -> SolverConfig:
 def maybe_prepare_pkl_dataset(args) -> None:
     if not args.prepare_pkls:
         return
+
+    print(
+        format_console_row(
+            "config",
+            "pkl-gen",
+            dir=str(args.pkl_dir),
+            width=args.width,
+            height=args.height,
+            seed=args.seed,
+            overwrite=bool(args.pkl_overwrite),
+        )
+    )
 
     cfg = make_solver_config(args)
 
@@ -166,6 +187,12 @@ def run_eval(args) -> EvalStats:
     if hasattr(policy, "reset_env"):
         policy.reset_env(env)
 
+    reward_shaper = None
+    if args.policy in {"bc", "mappo"}:
+        reward_shaper = build_outcome_reward(args)
+        if reward_shaper is not None:
+            print(reward_shaper.description())
+
     renderer = RenderTool(env, gl="PGL") if args.rendering and env is not None else None
 
     total_done_agents = 0
@@ -202,9 +229,10 @@ def run_eval(args) -> EvalStats:
             obs_batch = [observations[h] for h in handles]
             actions = policy.act_many(handles, obs_batch)
             observations, rewards, done, info = env.step(normalize_actions(actions))
+            if reward_shaper is not None:
+                rewards = reward_shaper(rewards, done, info, env, actions)
             if rewards:
                 episode_reward += float(sum(rewards.values()))
-            deadlocks = float(info.get("deadlocks", 0.0)) if isinstance(info, dict) else 0.0
             steps += 1
 
             if renderer is not None:
@@ -295,9 +323,68 @@ def run_record(args) -> None:
     record_dla_dataset(args, dataset_path=args.dataset_path)
 
 
+def _ensure_legacy_bc_pkls(args) -> None:
+    if args.env_source != "pkl":
+        return
+    pkl_files = list_pkl_dataset(args.pkl_dir)
+    if pkl_files:
+        print(f"[Env] Using {len(pkl_files)} cached environments at {args.pkl_dir}")
+        return
+
+    # Legacy BC default curriculum: 5 envs per agent-count.
+    if not args.agent_curriculum:
+        args.agent_curriculum = [1, 2, 3, 4, 5, 7, 10, 15, 20]
+    if int(args.pkl_num_envs_per_agent) <= 0:
+        args.pkl_num_envs_per_agent = 5
+
+    expected_total = int(args.pkl_num_envs_per_agent) * len(args.agent_curriculum)
+    print(f"[Env] Generating {expected_total} envs ({args.pkl_num_envs_per_agent} per agent-count) to {args.pkl_dir} ...")
+    print(f"[Env] Agent counts: {args.agent_curriculum}")
+
+    args.prepare_pkls = True
+    maybe_prepare_pkl_dataset(args)
+
+
+def run_bc_mode(args) -> None:
+    print("\n" + "=" * 60)
+    print("  Flatland MARL - mode=bc")
+    print("=" * 60 + "\n")
+    print("=" * 70)
+    print("BEHAVIOR CLONING from DLA expert (decision-points only)")
+    print("=" * 70)
+
+    # Legacy command semantics: BC pipeline always runs on MAPPO observations via PKL cache.
+    args.policy = "bc"
+    args.env_source = "pkl"
+    _ensure_legacy_bc_pkls(args)
+
+    record_args = argparse.Namespace(**vars(args))
+    record_args.episodes = int(args.bc_demo_episodes)
+    run_record(record_args)
+
+    train_args = argparse.Namespace(**vars(args))
+    train_args.episodes = int(args.bc_demo_episodes)
+    train_args.train_epochs = int(args.bc_epochs)
+    run_train(train_args)
+
+    print(f"\n[BC] Evaluating BC-pretrained policy on {int(args.bc_eval_episodes)} episodes ...")
+
+    eval_args = argparse.Namespace(**vars(args))
+    eval_args.policy = "mappo"
+    eval_args.mappo_checkpoint = Path(args.bc_checkpoint)
+    eval_args.episodes = int(args.bc_eval_episodes)
+    stats = run_eval(eval_args)
+    done_rate = stats.done_agents / max(1, stats.total_agents)
+    print(f"[BC] BC-policy done_rate = {done_rate:.3f}")
+
+
 def run_train(args) -> None:
     if args.policy == "bc":
-        args.obs_builder = BCObservationBuilder(obs_variant=args.obs_variant)
+        args.obs_builder = BCObservationBuilder(
+            obs_variant=args.obs_variant,
+            debug=bool(getattr(args, "legacy_obs_debug", False)),
+            search_depth=int(getattr(args, "legacy_obs_search_depth", 4)),
+        )
         if getattr(args, "dataset_path", None) and args.dataset_path.exists():
             # Offline mode: train from pre-recorded DLA dataset (fast, no DLA overhead)
             train_bc_from_dataset(args, checkpoint_path=args.bc_checkpoint, tb_logger=getattr(args, "tb_logger", None))
@@ -306,7 +393,11 @@ def run_train(args) -> None:
             train_bc(args, checkpoint_path=args.bc_checkpoint, tb_logger=getattr(args, "tb_logger", None))
         return
     if args.policy == "mappo":
-        args.obs_builder = MAPPOObservationBuilder(obs_variant=args.obs_variant)
+        args.obs_builder = MAPPOObservationBuilder(
+            obs_variant=args.obs_variant,
+            debug=bool(getattr(args, "legacy_obs_debug", False)),
+            search_depth=int(getattr(args, "legacy_obs_search_depth", 4)),
+        )
         train_mappo(args, checkpoint_path=args.mappo_checkpoint, tb_logger=getattr(args, "tb_logger", None))
         return
     raise ValueError("Train mode currently supports --policy bc or --policy mappo")
@@ -314,7 +405,7 @@ def run_train(args) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Experimental Flatland Solver")
-    parser.add_argument("--mode", choices=["eval", "train", "record"], default="eval")
+    parser.add_argument("--mode", choices=["eval", "train", "record", "bc"], default="eval")
     parser.add_argument("--policy", choices=["random", "dla", "bc", "mappo"], default="random")
     parser.add_argument("--episodes", type=int, default=5)
     parser.add_argument("--max-episode-steps", type=int, default=300)
@@ -332,8 +423,14 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["fast_tree", "decision_point", "spawn_aware", "conflict_aware"],
         default="fast_tree",
     )
+    parser.add_argument(
+        "--obs",
+        dest="obs_variant",
+        choices=["fast_tree", "decision_point", "spawn_aware", "conflict_aware"],
+        help="Legacy alias for --obs-variant",
+    )
     parser.add_argument("--env-source", choices=["generated", "pkl"], default="generated")
-    parser.add_argument("--pkl-dir", type=Path, default=Path("pkl_envs"))
+    parser.add_argument("--pkl-dir", type=Path, default=Path("generated_envs"))
     parser.add_argument("--pkl-count", type=int, default=32)
     parser.add_argument("--pkl-seed-start", type=int, default=1000)
     parser.add_argument("--pkl-overwrite", action="store_true")
@@ -379,6 +476,18 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Path for DLA-recorded dataset (--mode record writes, --mode train reads)")
     parser.add_argument("--batch-size", type=int, default=256,
                         help="Mini-batch size for offline BC training from dataset")
+    parser.add_argument("--legacy-obs-debug", action="store_true",
+                        help="Enable verbose legacy observation debug/performance reporting")
+    parser.add_argument("--legacy-obs-search-depth", type=int, default=4,
+                        help="Search depth for legacy observation variants")
+    parser.add_argument("--disable-outcome-reward", action="store_true",
+                        help="Disable legacy OutcomeBasedReward shaping for BC/MAPPO train/eval")
+    parser.add_argument("--bc-demo-episodes", type=int, default=200,
+                        help="Number of DLA demo episodes for --mode bc")
+    parser.add_argument("--bc-epochs", type=int, default=10,
+                        help="Number of offline BC epochs for --mode bc")
+    parser.add_argument("--bc-eval-episodes", type=int, default=20,
+                        help="Number of eval episodes after BC in --mode bc")
     return parser
 
 
@@ -420,6 +529,10 @@ def main() -> None:
 
         if args.mode == "record":
             run_record(args)
+            return
+
+        if args.mode == "bc":
+            run_bc_mode(args)
             return
 
         run_train(args)

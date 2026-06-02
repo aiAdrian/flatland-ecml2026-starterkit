@@ -328,6 +328,43 @@ All output (progress bars, metrics, TensorBoard logs) is displayed live in the c
 
 If you prefer a faster smoke test, run the **15-20 Min Validation Flow** above instead.
 
+## Legacy Migration Pipeline (Auto PKL + Optional BC Warmstart)
+
+For the exact flow you described (generate scenarios if missing, DLA demo collect,
+BC train from demos, optional BC warmstart into MAPPO, checkpoints + eval, full
+console and TensorBoard logging), use:
+
+```bash
+cd experimental/flatland_solver
+
+# Default: with BC warmstart
+./run_legacy_migration_pipeline.sh
+
+# MAPPO-only path (no BC record/train, no BC warmstart)
+./run_legacy_migration_pipeline.sh --without-bc
+
+# Legacy observation perf/debug reports (ObsFnPerf, feature reports)
+LEGACY_OBS_DEBUG=1 LEGACY_OBS_SEARCH_DEPTH=4 ./run_legacy_migration_pipeline.sh
+```
+
+Default generated scenario directory is now `generated_envs/` (old `pkl_envs/`
+still works when passed explicitly via `--pkl-dir`).
+
+What this script does:
+
+1. Builds PKL scenarios only when missing in `generated_envs/` (or forced with `--force-regenerate-pkls`).
+2. Records DLA demonstrations (`--mode record`) when BC is enabled.
+3. Trains BC offline from the recorded dataset (`--mode train --policy bc`).
+4. Starts MAPPO training with optional `--init-checkpoint` from BC.
+5. Saves MAPPO checkpoint and runs eval (and BC eval when BC is enabled).
+6. Logs everything to console + TensorBoard (`runs/`).
+
+You can override key run lengths via environment variables, for example:
+
+```bash
+RECORD_EPISODES=100 BC_EPOCHS=10 MAPPO_EPISODES=120 ./run_legacy_migration_pipeline.sh
+```
+
 ## Troubleshooting
 
 - If you use `--env-source pkl` and get "No PKL environments found", run `--prepare-pkls --prepare-only` first.

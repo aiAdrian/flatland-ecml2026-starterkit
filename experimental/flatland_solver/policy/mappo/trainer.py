@@ -2,11 +2,16 @@ from __future__ import annotations
 
 from collections import defaultdict
 from pathlib import Path
+from typing import Any
 
+import numpy as np
 import torch
 from torch.distributions import Categorical
+
+from flatland.envs.rail_env_action import RailEnvActions
 from flatland.envs.step_utils.states import TrainState
 
+from policy.mappo.policy import ActorCriticHead, BaseFeatureEncoder, TreePayloadEncoder
 from utils.action_utils import normalize_actions
 from utils.env_factory import (
     PklEnvMeta,
@@ -16,195 +21,9 @@ from utils.env_factory import (
     list_pkl_dataset,
     list_pkl_dataset_meta,
 )
-from utils.model_utils import ActorCriticNet, infer_obs_dim, split_obs_and_mask
+from utils.model_utils import infer_obs_dim
+from utils.outcome_reward import build_outcome_reward
 from utils.progress import RollingDoneRatio, format_console_row, make_progress_bar
-
-
-def _discounted_returns(rewards, gamma: float):
-    out = []
-    running = 0.0
-    for r in reversed(rewards):
-        running = float(r) + gamma * running
-        out.append(running)
-    out.reverse()
-    return out
-
-
-def _collect_episode(env, model, obs_dim: int, max_steps: int, seed: int, gamma: float):
-    observations, info = env.reset(random_seed=seed)
-    del info
-    done = {"__all__": False}
-    steps = 0
-    step_rewards: list[float] = []
-
-    feats: list[torch.Tensor] = []
-    masks: list[torch.Tensor] = []
-    actions: list[torch.Tensor] = []
-    old_logprobs: list[torch.Tensor] = []
-    values: list[torch.Tensor] = []
-    transition_step_idx: list[int] = []
-
-    while not done.get("__all__", False) and steps < max_steps:
-        handles = list(range(env.get_num_agents()))
-        obs_batch = [observations[h] for h in handles]
-        step_actions = {}
-
-        for h, obs in zip(handles, obs_batch):
-            feat, mask = split_obs_and_mask(obs, obs_dim=obs_dim)
-            logits, value = model(feat)
-            logits = logits.masked_fill(mask < 0.5, float("-inf"))
-            dist = Categorical(logits=logits)
-            action = dist.sample()
-
-            step_actions[h] = int(action.item())
-            feats.append(feat.detach())
-            masks.append(mask.detach())
-            actions.append(action.detach())
-            old_logprobs.append(dist.log_prob(action).detach())
-            values.append(value.detach().reshape(()))
-            transition_step_idx.append(steps)
-
-        observations, rewards, done, info = env.step(normalize_actions(step_actions))
-        del info
-        team_reward = sum(float(rewards[h]) for h in handles) / max(1, len(handles))
-        step_rewards.append(team_reward)
-        steps += 1
-
-    if not step_rewards:
-        return None
-
-    returns_step = torch.as_tensor(_discounted_returns(step_rewards, gamma), dtype=torch.float32)
-    values_t = torch.stack(values).to(torch.float32)
-    returns_t = torch.as_tensor([float(returns_step[i]) for i in transition_step_idx], dtype=torch.float32)
-    advantages_t = returns_t - values_t
-
-    ep_done = sum(a.state == TrainState.DONE for a in env.agents)
-    active_or_blocked = sum(
-        a.state in (TrainState.MOVING, TrainState.STOPPED, TrainState.MALFUNCTION)
-        for a in env.agents
-    )
-    deadlock_rate = active_or_blocked / max(1, env.get_num_agents())
-
-    return {
-        "feats": torch.stack(feats, dim=0),
-        "masks": torch.stack(masks, dim=0),
-        "actions": torch.stack(actions, dim=0),
-        "old_logprobs": torch.stack(old_logprobs, dim=0),
-        "returns": returns_t,
-        "advantages": advantages_t,
-        "steps": steps,
-        "ep_done": ep_done,
-        "n_agents": env.get_num_agents(),
-        "ep_reward": float(sum(step_rewards)),
-        "deadlock_rate": deadlock_rate,
-    }
-
-
-def _ppo_update(
-    model,
-    opt,
-    buffer,
-    ppo_epochs: int,
-    batch_size: int,
-    entropy_coef: float = 0.02,
-    value_coef: float = 0.5,
-    clip_eps: float = 0.2,
-    target_kl: float = 0.05,
-    kl_stop_factor: float = 1.5,
-):
-    feats = torch.cat(buffer["feats"], dim=0)
-    masks = torch.cat(buffer["masks"], dim=0)
-    actions = torch.cat(buffer["actions"], dim=0)
-    old_logprobs = torch.cat(buffer["old_logprobs"], dim=0)
-    returns = torch.cat(buffer["returns"], dim=0)
-    advantages = torch.cat(buffer["advantages"], dim=0)
-
-    if feats.shape[0] == 0:
-        return None
-
-    advantages = (advantages - advantages.mean()) / (advantages.std(unbiased=False) + 1e-8)
-    n = feats.shape[0]
-
-    stats = {
-        "p_loss": [],
-        "v_loss": [],
-        "entropy": [],
-        "approx_kl": [],
-        "ratio": [],
-        "clip_frac": [],
-        "early_stop_skips": [],
-    }
-    n_minibatches = 0
-    kl_skip_threshold = float(target_kl) * float(kl_stop_factor)
-
-    for _ in range(max(1, int(ppo_epochs))):
-        perm = torch.randperm(n)
-        for start in range(0, n, max(1, int(batch_size))):
-            mb = perm[start:start + max(1, int(batch_size))]
-            n_minibatches += 1
-
-            b_feat = feats[mb]
-            b_mask = masks[mb]
-            b_act = actions[mb]
-            b_old_lp = old_logprobs[mb]
-            b_ret = returns[mb]
-            b_adv = advantages[mb]
-
-            logits, values = model(b_feat)
-            logits = logits.masked_fill(b_mask < 0.5, float("-inf"))
-            dist = Categorical(logits=logits)
-            new_logp = dist.log_prob(b_act)
-            ent = dist.entropy().mean()
-
-            ratio = torch.exp(new_logp - b_old_lp)
-            log_ratio = new_logp - b_old_lp
-            with torch.no_grad():
-                # Legacy-like KL guard BEFORE optimizer step.
-                approx_kl_guard = torch.mean((ratio - 1.0) - log_ratio)
-            if float(approx_kl_guard.item()) > kl_skip_threshold:
-                if n_minibatches <= 2 or n_minibatches % 8 == 0:
-                    print(
-                        f"[PPO] KL early-stop at mb#{n_minibatches}: "
-                        f"approx_kl={float(approx_kl_guard.item()):.4f} > {kl_skip_threshold:.4f} (skip update)"
-                    )
-                stats["approx_kl"].append(float(approx_kl_guard.item()))
-                stats["ratio"].append(float(ratio.mean().item()))
-                stats["early_stop_skips"].append(1.0)
-                continue
-
-            surr1 = ratio * b_adv
-            surr2 = torch.clamp(ratio, 1.0 - clip_eps, 1.0 + clip_eps) * b_adv
-            p_loss = -torch.min(surr1, surr2).mean()
-
-            values = values.view(-1)
-            v_loss = torch.mean((values - b_ret) ** 2)
-            loss = p_loss + float(value_coef) * v_loss - float(entropy_coef) * ent
-
-            opt.zero_grad()
-            loss.backward()
-            opt.step()
-
-            with torch.no_grad():
-                approx_kl = torch.mean(b_old_lp - new_logp)
-                clip_frac = torch.mean((torch.abs(ratio - 1.0) > clip_eps).to(torch.float32))
-
-            stats["p_loss"].append(float(p_loss.item()))
-            stats["v_loss"].append(float(v_loss.item()))
-            stats["entropy"].append(float(ent.item()))
-            stats["approx_kl"].append(float(approx_kl.item()))
-            stats["ratio"].append(float(ratio.mean().item()))
-            stats["clip_frac"].append(float(clip_frac.item()))
-            stats["early_stop_skips"].append(0.0)
-
-    out = {k: (sum(v) / max(1, len(v))) for k, v in stats.items()}
-    out["n_minibatches"] = n_minibatches
-    out["n_samples"] = int(n)
-    print(
-        f"[PPO-DEBUG] DONE n_mb={n_minibatches} "
-        f"KL={out.get('approx_kl', 0.0):+.6f} ratio={out.get('ratio', 0.0):.5f} "
-        f"clip_frac={out.get('clip_frac', 0.0):.3f} skip={out.get('early_stop_skips', 0.0):.3f}"
-    )
-    return out
 
 
 def _group_pkls_by_n_agents(metas: list[PklEnvMeta], curriculum: list[int]) -> dict[int, list[Path]]:
@@ -216,17 +35,432 @@ def _group_pkls_by_n_agents(metas: list[PklEnvMeta], curriculum: list[int]) -> d
     return grouped
 
 
+def _unwrap_state(state: Any, base_dim: int) -> tuple[np.ndarray, list[np.ndarray], dict[str, Any]]:
+    if isinstance(state, list) and len(state) > 0 and isinstance(state[0], (tuple, list)):
+        state = state[-1]
+
+    if isinstance(state, (tuple, list)):
+        if len(state) >= 3:
+            obs, opps, payload = state[0], state[1], state[2]
+            base = np.asarray(obs, dtype=np.float32).flatten()
+            if not isinstance(opps, list):
+                opps = []
+            if not isinstance(payload, dict):
+                payload = {}
+        elif len(state) >= 1:
+            base = np.asarray(state[0], dtype=np.float32).flatten()
+            opps, payload = [], {}
+        else:
+            base = np.zeros(base_dim, dtype=np.float32)
+            opps, payload = [], {}
+    else:
+        base = np.asarray(state, dtype=np.float32).flatten()
+        opps, payload = [], {}
+
+    if base.shape[0] < base_dim:
+        base = np.concatenate([base, np.zeros(base_dim - base.shape[0], dtype=np.float32)], axis=0)
+    return base[:base_dim], opps, payload
+
+
+def _neighbor_pool(opps: list[np.ndarray], base_dim: int) -> np.ndarray:
+    if not opps:
+        return np.zeros(base_dim, dtype=np.float32)
+    arrs = []
+    for o in opps:
+        v = np.asarray(o, dtype=np.float32).flatten()
+        if v.shape[0] >= base_dim:
+            arrs.append(v[:base_dim])
+    if not arrs:
+        return np.zeros(base_dim, dtype=np.float32)
+    return np.mean(np.stack(arrs, axis=0), axis=0)
+
+
+def _legal_action_mask(base_obs: np.ndarray, agent) -> np.ndarray:
+    mask = np.zeros(5, dtype=np.float32)
+
+    if agent.state == TrainState.DONE:
+        mask[int(RailEnvActions.DO_NOTHING.value)] = 1.0
+        return mask
+
+    waiting_state = getattr(TrainState, "WAITING", None)
+    if waiting_state is not None and agent.state == waiting_state:
+        mask[int(RailEnvActions.DO_NOTHING.value)] = 1.0
+        return mask
+
+    if hasattr(agent.state, "is_off_map_state") and agent.state.is_off_map_state():
+        mask[int(RailEnvActions.DO_NOTHING.value)] = 1.0
+        mask[int(RailEnvActions.STOP_MOVING.value)] = 1.0
+        mask[int(RailEnvActions.MOVE_FORWARD.value)] = 1.0
+        return mask
+
+    mask[int(RailEnvActions.STOP_MOVING.value)] = 1.0
+
+    left_ok = float(base_obs[0]) > 0.5 if base_obs.shape[0] >= 1 else False
+    fwd_ok = float(base_obs[1]) > 0.5 if base_obs.shape[0] >= 2 else False
+    right_ok = float(base_obs[2]) > 0.5 if base_obs.shape[0] >= 3 else False
+    n_trans = int(left_ok) + int(fwd_ok) + int(right_ok)
+
+    if n_trans == 1:
+        mask[int(RailEnvActions.MOVE_FORWARD.value)] = 1.0
+    elif n_trans > 1:
+        mask[int(RailEnvActions.MOVE_LEFT.value)] = 1.0 if left_ok else 0.0
+        mask[int(RailEnvActions.MOVE_FORWARD.value)] = 1.0 if fwd_ok else 0.0
+        mask[int(RailEnvActions.MOVE_RIGHT.value)] = 1.0 if right_ok else 0.0
+
+    if np.sum(mask > 0.5) <= 0:
+        mask[int(RailEnvActions.DO_NOTHING.value)] = 1.0
+
+    return mask
+
+
+def _forward_legacy(
+    base_encoder: BaseFeatureEncoder,
+    tree_encoder: TreePayloadEncoder,
+    fuse: torch.nn.Module,
+    head: ActorCriticHead,
+    base_t: torch.Tensor,
+    payloads: list[dict[str, Any]],
+    pool_t: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    emb_base = base_encoder(base_t)
+    emb_tree = tree_encoder.forward_batch(payloads)
+    emb = fuse(torch.cat([emb_base, emb_tree], dim=-1))
+    logits = head.actor_logits(emb)
+    values = head.value(emb, pool_t)
+    return logits, values
+
+
+def _collect_episode(
+    env,
+    base_encoder: BaseFeatureEncoder,
+    tree_encoder: TreePayloadEncoder,
+    fuse: torch.nn.Module,
+    head: ActorCriticHead,
+    base_dim: int,
+    seed: int,
+    max_steps: int,
+    reward_shaper=None,
+) -> dict[str, Any] | None:
+    observations, info = env.reset(random_seed=seed)
+    del info
+    done = {"__all__": False}
+    steps = 0
+
+    traj: dict[int, list[tuple]] = defaultdict(list)
+    action_hist = torch.zeros(5, dtype=torch.long)
+    feat_sum = 0.0
+    feat_sq_sum = 0.0
+    feat_count = 0
+    mask_active = 0.0
+    mask_count = 0.0
+    ep_reward = 0.0
+
+    device = next(base_encoder.parameters()).device
+
+    while not done.get("__all__", False) and steps < max_steps:
+        handles = list(range(env.get_num_agents()))
+        step_actions: dict[int, int] = {}
+        pending: list[tuple] = []
+
+        for h in handles:
+            base_obs, opps, payload = _unwrap_state(observations[h], base_dim)
+            n_pool = _neighbor_pool(opps, base_dim)
+            mask_np = _legal_action_mask(base_obs, env.agents[h])
+
+            base_t = torch.from_numpy(base_obs).float().unsqueeze(0).to(device)
+            pool_t = torch.from_numpy(n_pool).float().unsqueeze(0).to(device)
+            mask_t = torch.from_numpy(mask_np).float().unsqueeze(0).to(device)
+
+            with torch.no_grad():
+                logits, value = _forward_legacy(base_encoder, tree_encoder, fuse, head, base_t, [payload], pool_t)
+                logits = logits.masked_fill(mask_t < 0.5, float("-inf"))
+                dist = Categorical(logits=logits)
+                action_t = dist.sample()
+                action = int(action_t.item())
+                old_lp = float(dist.log_prob(action_t).item())
+                val = float(value.item())
+
+            step_actions[h] = action
+            pending.append((h, base_obs, n_pool, payload, action, old_lp, val, mask_np))
+
+            action_hist[action] += 1
+            feat_sum += float(base_obs.sum())
+            feat_sq_sum += float(np.square(base_obs).sum())
+            feat_count += int(base_obs.size)
+            mask_active += float(np.sum(mask_np > 0.5))
+            mask_count += float(mask_np.size)
+
+        observations, rewards, done, info = env.step(normalize_actions(step_actions))
+        if reward_shaper is not None:
+            rewards = reward_shaper(rewards, done, info, env, step_actions)
+        del info
+        ep_reward += float(sum(rewards.values())) if rewards else 0.0
+
+        for h, base_obs, n_pool, payload, action, old_lp, val, mask_np in pending:
+            reward_h = float(rewards.get(h, 0.0)) if isinstance(rewards, dict) else 0.0
+            done_h = False
+            if isinstance(done, dict):
+                try:
+                    done_h = bool(done[h])  # type: ignore[index]
+                except Exception:
+                    done_h = False
+            finished_h = bool(env.agents[h].state == TrainState.DONE)
+            traj[h].append((base_obs, n_pool, payload, action, reward_h, done_h, finished_h, old_lp, val, mask_np))
+
+        steps += 1
+
+    if len(traj) == 0:
+        return None
+
+    ep_done = sum(a.state == TrainState.DONE for a in env.agents)
+    active_or_blocked = sum(
+        a.state in (TrainState.MOVING, TrainState.STOPPED, TrainState.MALFUNCTION)
+        for a in env.agents
+    )
+
+    return {
+        "traj": traj,
+        "steps": steps,
+        "ep_done": ep_done,
+        "n_agents": env.get_num_agents(),
+        "ep_reward": ep_reward,
+        "deadlock_rate": active_or_blocked / max(1, env.get_num_agents()),
+        "action_hist": action_hist,
+        "feat_sum": feat_sum,
+        "feat_sq_sum": feat_sq_sum,
+        "feat_count": feat_count,
+        "mask_active": mask_active,
+        "mask_count": mask_count,
+    }
+
+
+def _build_ppo_batch(
+    episodes: list[dict[str, Any]],
+    gamma: float,
+    gae_lambda: float,
+    base_dim: int,
+    device: torch.device,
+) -> dict[str, Any] | None:
+    all_base, all_pool, all_payload = [], [], []
+    all_act, all_old_lp = [], []
+    all_adv, all_ret, all_mask = [], [], []
+
+    for ep in episodes:
+        for transitions in ep["traj"].values():
+            if not transitions:
+                continue
+
+            t_len = len(transitions)
+            base_arr = np.stack([t[0] for t in transitions], axis=0).astype(np.float32)
+            pool_arr = np.stack([t[1] for t in transitions], axis=0).astype(np.float32)
+            payloads = [t[2] for t in transitions]
+            actions = np.asarray([int(t[3]) for t in transitions], dtype=np.int64)
+            rewards = np.asarray([float(t[4]) for t in transitions], dtype=np.float32)
+            dones = np.asarray([float(t[5]) for t in transitions], dtype=np.float32)
+            finished = np.asarray([float(t[6]) for t in transitions], dtype=np.float32)
+            old_lp = np.asarray([float(t[7]) for t in transitions], dtype=np.float32)
+            values = np.asarray([float(t[8]) for t in transitions], dtype=np.float32)
+            masks = np.stack([t[9] for t in transitions], axis=0).astype(np.float32)
+
+            adv = np.zeros(t_len, dtype=np.float32)
+            gae = 0.0
+            next_value = 0.0 if (t_len > 0 and finished[-1] > 0.5) else float(values[-1])
+            for i in reversed(range(t_len)):
+                next_v = next_value if i == t_len - 1 else float(values[i + 1])
+                delta = rewards[i] + gamma * next_v * (1.0 - finished[i]) - values[i]
+                gae = delta + gamma * gae_lambda * gae * (1.0 - dones[i])
+                adv[i] = gae
+            ret = adv + values
+
+            all_base.append(base_arr[:, :base_dim])
+            all_pool.append(pool_arr[:, :base_dim])
+            all_payload.extend(payloads)
+            all_act.append(actions)
+            all_old_lp.append(old_lp)
+            all_adv.append(adv)
+            all_ret.append(ret)
+            all_mask.append(masks)
+
+    if not all_base:
+        return None
+
+    base_arr = np.concatenate(all_base, axis=0)
+    pool_arr = np.concatenate(all_pool, axis=0)
+    act_arr = np.concatenate(all_act, axis=0)
+    old_lp_arr = np.concatenate(all_old_lp, axis=0)
+    adv_arr = np.concatenate(all_adv, axis=0)
+    ret_arr = np.concatenate(all_ret, axis=0)
+    mask_arr = np.concatenate(all_mask, axis=0)
+
+    adv_mean = float(np.mean(adv_arr))
+    adv_std = float(np.std(adv_arr) + 1e-8)
+    adv_norm = np.clip((adv_arr - adv_mean) / adv_std, -5.0, 5.0)
+
+    return {
+        "base": torch.from_numpy(base_arr).float().to(device),
+        "pool": torch.from_numpy(pool_arr).float().to(device),
+        "payload": all_payload,
+        "act": torch.from_numpy(act_arr).long().to(device),
+        "old_lp": torch.from_numpy(old_lp_arr).float().to(device),
+        "adv": torch.from_numpy(adv_norm).float().to(device),
+        "ret": torch.from_numpy(ret_arr).float().to(device),
+        "mask": torch.from_numpy(mask_arr).float().to(device),
+    }
+
+
+def _ppo_update(
+    base_encoder: BaseFeatureEncoder,
+    tree_encoder: TreePayloadEncoder,
+    fuse: torch.nn.Module,
+    head: ActorCriticHead,
+    optimizer: torch.optim.Optimizer,
+    batch: dict[str, Any] | None,
+    ppo_epochs: int,
+    batch_size: int,
+    entropy_coef: float,
+    value_coef: float,
+    clip_eps: float,
+    max_grad_norm: float,
+    target_kl: float,
+    kl_stop_factor: float,
+) -> dict[str, float] | None:
+    if batch is None:
+        return None
+
+    n = int(batch["act"].shape[0])
+    if n <= 0:
+        return None
+
+    stats: dict[str, list[float]] = {
+        "v_loss": [],
+        "p_loss": [],
+        "entropy": [],
+        "approx_kl": [],
+        "ratio": [],
+        "clip_frac": [],
+        "early_stop_skips": [],
+    }
+    n_minibatches = 0
+    kl_skip_threshold = float(target_kl) * float(kl_stop_factor)
+
+    with torch.no_grad():
+        head_snapshot = [p.detach().clone() for p in head.parameters()]
+
+    for _ in range(max(1, int(ppo_epochs))):
+        idx = np.random.permutation(n)
+        epoch_early_stop = False
+
+        for start in range(0, n, max(1, int(batch_size))):
+            mb = idx[start:start + max(1, int(batch_size))]
+            if len(mb) < 8:
+                continue
+            n_minibatches += 1
+
+            b_base = batch["base"][mb]
+            b_pool = batch["pool"][mb]
+            b_payload = [batch["payload"][i] for i in mb.tolist()]
+            b_act = batch["act"][mb]
+            b_old_lp = batch["old_lp"][mb]
+            b_adv = batch["adv"][mb]
+            b_ret = batch["ret"][mb]
+            b_mask = batch["mask"][mb]
+
+            logits, values = _forward_legacy(base_encoder, tree_encoder, fuse, head, b_base, b_payload, b_pool)
+            logits = logits.masked_fill(b_mask < 0.5, float("-inf"))
+            dist = Categorical(logits=logits)
+            lp = dist.log_prob(b_act)
+            ent = dist.entropy().mean()
+
+            log_ratio = lp - b_old_lp
+            log_ratio = torch.clamp(log_ratio, min=-10.0, max=10.0)
+            ratio = torch.exp(log_ratio)
+            surr1 = ratio * b_adv
+            surr2 = torch.clamp(ratio, 1.0 - clip_eps, 1.0 + clip_eps) * b_adv
+            p_loss = -torch.min(surr1, surr2).mean()
+            v_loss = ((values - b_ret) ** 2).mean()
+            loss = p_loss + float(value_coef) * v_loss - float(entropy_coef) * ent
+
+            with torch.no_grad():
+                approx_kl_guard = float(torch.mean((ratio - 1.0) - log_ratio).item())
+            if approx_kl_guard > kl_skip_threshold:
+                if n_minibatches <= 2 or n_minibatches % 8 == 0:
+                    print(
+                        f"[PPO] KL early-stop at mb#{n_minibatches}: "
+                        f"approx_kl={approx_kl_guard:.4f} > {kl_skip_threshold:.4f} (skip update)"
+                    )
+                stats["approx_kl"].append(approx_kl_guard)
+                stats["ratio"].append(float(ratio.mean().item()))
+                stats["v_loss"].append(float(v_loss.item()))
+                stats["p_loss"].append(float(p_loss.item()))
+                stats["entropy"].append(float(ent.item()))
+                stats["clip_frac"].append(0.0)
+                stats["early_stop_skips"].append(1.0)
+                epoch_early_stop = True
+                break
+
+            optimizer.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(
+                list(base_encoder.parameters())
+                + list(tree_encoder.parameters())
+                + list(fuse.parameters())
+                + list(head.parameters()),
+                max_grad_norm,
+            )
+            optimizer.step()
+
+            with torch.no_grad():
+                approx_kl = float(torch.mean(b_old_lp - lp).item())
+                clip_frac = float(((ratio - 1.0).abs() > clip_eps).float().mean().item())
+
+            stats["v_loss"].append(float(v_loss.item()))
+            stats["p_loss"].append(float(p_loss.item()))
+            stats["entropy"].append(float(ent.item()))
+            stats["approx_kl"].append(approx_kl)
+            stats["ratio"].append(float(ratio.mean().item()))
+            stats["clip_frac"].append(clip_frac)
+            stats["early_stop_skips"].append(0.0)
+
+        if epoch_early_stop:
+            continue
+
+    with torch.no_grad():
+        max_param_change = 0.0
+        for p_old, p_new in zip(head_snapshot, head.parameters()):
+            diff = float((p_new - p_old).abs().max().item())
+            if diff > max_param_change:
+                max_param_change = diff
+
+    out = {k: (float(np.mean(v)) if v else 0.0) for k, v in stats.items()}
+    out["n_minibatches"] = float(n_minibatches)
+    out["n_samples"] = float(n)
+    out["head_max_dparam"] = float(max_param_change)
+
+    print(
+        f"[PPO-DEBUG] DONE n_mb={n_minibatches} "
+        f"KL={out.get('approx_kl', 0.0):+.6f} ratio={out.get('ratio', 0.0):.5f} "
+        f"head_max_dparam={out.get('head_max_dparam', 0.0):.6f} "
+        f"clip_frac={out.get('clip_frac', 0.0):.3f}"
+    )
+
+    return out
+
+
 def _eval_model(
-    model,
+    base_encoder: BaseFeatureEncoder,
+    tree_encoder: TreePayloadEncoder,
+    fuse: torch.nn.Module,
+    head: ActorCriticHead,
     obs_builder,
     cfg: SolverConfig,
     env_source: str,
     pkl_files: list[Path],
-    obs_dim: int,
+    base_dim: int,
     n_episodes: int,
     max_steps: int,
     seed_base: int,
     greedy: bool,
+    reward_shaper=None,
 ):
     if n_episodes <= 0:
         return {"done_rate": 0.0, "deadlock_rate": 0.0, "episode_len": 0.0, "total_reward": 0.0}
@@ -241,6 +475,8 @@ def _eval_model(
     lengths = []
     rewards_sum = []
 
+    device = next(base_encoder.parameters()).device
+
     for ep in range(n_episodes):
         if env_source == "pkl":
             env = build_env_from_pkl(pkl_files[ep % len(pkl_files)], obs_builder=obs_builder)
@@ -253,19 +489,27 @@ def _eval_model(
 
         while not done.get("__all__", False) and steps < max_steps:
             handles = list(range(env.get_num_agents()))
-            obs_batch = [observations[h] for h in handles]
             actions = {}
-            for h, obs in zip(handles, obs_batch):
-                feat, mask = split_obs_and_mask(obs, obs_dim=obs_dim)
-                logits, _ = model(feat)
-                logits = logits.masked_fill(mask < 0.5, float("-inf"))
-                if greedy:
-                    action = int(torch.argmax(logits).item())
-                else:
-                    action = int(Categorical(logits=logits).sample().item())
+            for h in handles:
+                base_obs, opps, payload = _unwrap_state(observations[h], base_dim)
+                n_pool = _neighbor_pool(opps, base_dim)
+                mask_np = _legal_action_mask(base_obs, env.agents[h])
+                base_t = torch.from_numpy(base_obs).float().unsqueeze(0).to(device)
+                pool_t = torch.from_numpy(n_pool).float().unsqueeze(0).to(device)
+                mask_t = torch.from_numpy(mask_np).float().unsqueeze(0).to(device)
+
+                with torch.no_grad():
+                    logits, _ = _forward_legacy(base_encoder, tree_encoder, fuse, head, base_t, [payload], pool_t)
+                    logits = logits.masked_fill(mask_t < 0.5, float("-inf"))
+                    if greedy:
+                        action = int(torch.argmax(logits, dim=-1).item())
+                    else:
+                        action = int(Categorical(logits=logits).sample().item())
                 actions[h] = action
 
             observations, rewards, done, info = env.step(normalize_actions(actions))
+            if reward_shaper is not None:
+                rewards = reward_shaper(rewards, done, info, env, actions)
             del info
             ep_reward += float(sum(rewards.values())) if rewards else 0.0
             steps += 1
@@ -288,6 +532,31 @@ def _eval_model(
     }
 
 
+def _save_checkpoint(
+    checkpoint_path: Path,
+    base_encoder: BaseFeatureEncoder,
+    tree_encoder: TreePayloadEncoder,
+    fuse: torch.nn.Module,
+    head: ActorCriticHead,
+    optimizer: torch.optim.Optimizer,
+    base_dim: int,
+):
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(
+        {
+            "base_encoder": base_encoder.state_dict(),
+            "tree_encoder": tree_encoder.state_dict(),
+            "fuse": fuse.state_dict(),
+            "head": head.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "hidden": 64,
+            "base_dim": base_dim,
+            "kind": "mappo_legacy",
+        },
+        checkpoint_path,
+    )
+
+
 def train_mappo(args, checkpoint_path: Path, tb_logger=None) -> Path:
     obs_builder = args.obs_builder
     cfg = SolverConfig(
@@ -299,31 +568,79 @@ def train_mappo(args, checkpoint_path: Path, tb_logger=None) -> Path:
         max_rail_pairs_in_city=args.max_rail_pairs_in_city,
         seed=args.seed,
     )
+
     pkl_files = list_pkl_dataset(args.pkl_dir) if args.env_source == "pkl" else []
     pkl_metas = list_pkl_dataset_meta(args.pkl_dir) if args.env_source == "pkl" else []
     if args.env_source == "pkl" and not pkl_files:
         raise ValueError(f"No PKL environments found in {args.pkl_dir}. Run with --prepare-pkls first.")
+
     if args.env_source == "generated":
         env = build_env(cfg=cfg, obs_builder=obs_builder)
     else:
         env = build_env_from_pkl(pkl_files[0], obs_builder=obs_builder)
 
-    probe_obs, _probe_info = env.reset(random_seed=args.seed)
-    del _probe_info
+    probe_obs, _ = env.reset(random_seed=args.seed)
     if isinstance(probe_obs, dict):
         first_obs = probe_obs[0] if 0 in probe_obs else next(iter(probe_obs.values()))
     else:
         first_obs = probe_obs[0]
-    obs_dim = infer_obs_dim(first_obs, default=36)
+    base_dim = infer_obs_dim(first_obs, default=36)
 
-    model = ActorCriticNet(obs_dim=obs_dim, action_dim=5)
+    print(">> MAPPOPolicy")
+    print(f">> MAPPOPolicy initialised with BASE_DIM={base_dim}")
+
+    device = torch.device("cpu")
+    base_encoder = BaseFeatureEncoder(base_dim=base_dim, hidden=64).to(device)
+    tree_encoder = TreePayloadEncoder(hidden=64).to(device)
+    fuse = torch.nn.Sequential(
+        torch.nn.Linear(128, 64),
+        torch.nn.LayerNorm(64),
+        torch.nn.LeakyReLU(0.01),
+    ).to(device)
+    head = ActorCriticHead(hidden=64, action_size=5, base_dim=base_dim).to(device)
+    optimizer = torch.optim.AdamW(
+        list(base_encoder.parameters())
+        + list(tree_encoder.parameters())
+        + list(fuse.parameters())
+        + list(head.parameters()),
+        lr=float(args.lr),
+    )
+
+    warmstart_used = False
     if args.init_checkpoint and Path(args.init_checkpoint).exists():
         payload = torch.load(args.init_checkpoint, map_location="cpu")
-        if "model_state" in payload:
-            model.load_state_dict(payload["model_state"], strict=False)
-            print(f"[train-mappo] warmstart={args.init_checkpoint}")
+        if all(k in payload for k in ["base_encoder", "tree_encoder", "fuse", "head"]):
+            base_encoder.load_state_dict(payload["base_encoder"], strict=False)
+            tree_encoder.load_state_dict(payload["tree_encoder"], strict=False)
+            fuse.load_state_dict(payload["fuse"], strict=False)
+            head.load_state_dict(payload["head"], strict=False)
+            warmstart_used = True
+            print(f"[train-mappo] warmstart(legacy)={args.init_checkpoint}")
+        elif "model_state" in payload:
+            print("[train-mappo] init-checkpoint is compact BC/ActorCritic format; legacy warmstart skipped.")
 
-    opt = torch.optim.Adam(model.parameters(), lr=args.lr)
+    print(
+        format_console_row(
+            "config",
+            "mappo",
+            epochs=args.train_epochs,
+            episodes=args.episodes,
+            lr=args.lr,
+            obs=args.obs_variant,
+            env_source=args.env_source,
+            pkl_dir=str(args.pkl_dir),
+            rollout_eps=args.mappo_rollout_episodes,
+            ppo_epochs=args.mappo_ppo_epochs,
+            batch_size=args.mappo_batch_size,
+            max_steps=args.max_episode_steps,
+            warmstart=warmstart_used,
+        )
+    )
+
+    reward_shaper = build_outcome_reward(args)
+    if reward_shaper is not None:
+        print(reward_shaper.description())
+
     total_feature_sum = 0.0
     total_feature_sq_sum = 0.0
     total_feature_count = 0
@@ -338,7 +655,7 @@ def train_mappo(args, checkpoint_path: Path, tb_logger=None) -> Path:
     grouped_cursor = {k: 0 for k in grouped_pkls.keys()}
     global_pkl_cursor = 0
     global_update_idx = 0
-    eval_log: list[dict] = []
+    eval_log: list[dict[str, Any]] = []
 
     for epoch in range(args.train_epochs):
         epoch_policy_loss = 0.0
@@ -349,7 +666,7 @@ def train_mappo(args, checkpoint_path: Path, tb_logger=None) -> Path:
         epoch_clip_frac = 0.0
         n_updates = 0
 
-        rolling_done = RollingDoneRatio(window_size=20)
+        rolling_done = RollingDoneRatio(window_size=max(1, int(getattr(args, "mappo_done_window", 50))))
         bar = make_progress_bar(total=args.episodes, desc=f"MAPPO[{epoch + 1}/{args.train_epochs}]")
 
         ep = 0
@@ -368,14 +685,7 @@ def train_mappo(args, checkpoint_path: Path, tb_logger=None) -> Path:
             else:
                 target_rollout_eps = min(args.episodes - ep, max(1, int(args.mappo_rollout_episodes)))
 
-            buffer = {
-                "feats": [],
-                "masks": [],
-                "actions": [],
-                "old_logprobs": [],
-                "returns": [],
-                "advantages": [],
-            }
+            episodes_block: list[dict[str, Any]] = []
             block_collected = 0
 
             for block_i in range(target_rollout_eps):
@@ -412,29 +722,27 @@ def train_mappo(args, checkpoint_path: Path, tb_logger=None) -> Path:
 
                 episode = _collect_episode(
                     env=env,
-                    model=model,
-                    obs_dim=obs_dim,
-                    max_steps=args.max_episode_steps,
+                    base_encoder=base_encoder,
+                    tree_encoder=tree_encoder,
+                    fuse=fuse,
+                    head=head,
+                    base_dim=base_dim,
                     seed=args.seed + epoch * 1000 + ep,
-                    gamma=args.gamma,
+                    max_steps=args.max_episode_steps,
+                    reward_shaper=reward_shaper,
                 )
                 if episode is None:
                     continue
 
-                buffer["feats"].append(episode["feats"])
-                buffer["masks"].append(episode["masks"])
-                buffer["actions"].append(episode["actions"])
-                buffer["old_logprobs"].append(episode["old_logprobs"])
-                buffer["returns"].append(episode["returns"])
-                buffer["advantages"].append(episode["advantages"])
+                episodes_block.append(episode)
                 block_collected += 1
 
-                total_feature_sum += float(episode["feats"].sum().item())
-                total_feature_sq_sum += float((episode["feats"] * episode["feats"]).sum().item())
-                total_feature_count += int(episode["feats"].numel())
-                total_mask_active += float((episode["masks"] > 0.5).sum().item())
-                total_mask_count += float(episode["masks"].numel())
-                total_action_hist += torch.bincount(episode["actions"].to(torch.long), minlength=5)
+                total_feature_sum += float(episode["feat_sum"])
+                total_feature_sq_sum += float(episode["feat_sq_sum"])
+                total_feature_count += int(episode["feat_count"])
+                total_mask_active += float(episode["mask_active"])
+                total_mask_count += float(episode["mask_count"])
+                total_action_hist += episode["action_hist"]
 
                 ep_done = int(episode["ep_done"])
                 n_agents_ep = int(episode["n_agents"])
@@ -484,7 +792,7 @@ def train_mappo(args, checkpoint_path: Path, tb_logger=None) -> Path:
                     )
                     tb_logger.log_scalar("env/n_agents", n_agents_ep, ep_idx)
                     tb_logger.log_scalar("env/done_count", ep_done, ep_idx)
-                    ad = torch.bincount(episode["actions"].to(torch.long), minlength=5).to(torch.float32)
+                    ad = episode["action_hist"].to(torch.float32)
                     denom = max(1.0, float(ad.sum().item()))
                     tb_logger.log_scalar("actions/do_nothing", float(ad[0].item() / denom), ep_idx)
                     tb_logger.log_scalar("actions/move_left", float(ad[1].item() / denom), ep_idx)
@@ -496,16 +804,20 @@ def train_mappo(args, checkpoint_path: Path, tb_logger=None) -> Path:
                 if mid_eval_every > 0 and ep % mid_eval_every == 0:
                     print(f"\n[Train] Mid-training eval at episode {ep} ...")
                     mid_metrics = _eval_model(
-                        model=model,
+                        base_encoder=base_encoder,
+                        tree_encoder=tree_encoder,
+                        fuse=fuse,
+                        head=head,
                         obs_builder=obs_builder,
                         cfg=cfg,
                         env_source=args.env_source,
                         pkl_files=pkl_files,
-                        obs_dim=obs_dim,
+                        base_dim=base_dim,
                         n_episodes=int(getattr(args, "mappo_mid_eval_episodes", 10)),
                         max_steps=args.max_episode_steps,
                         seed_base=args.seed + epoch * 100000 + ep,
                         greedy=bool(getattr(args, "mappo_eval_greedy", False)),
+                        reward_shaper=reward_shaper,
                     )
                     eval_entry = {"kind": "mid", "episode": ep, **mid_metrics}
                     eval_log.append(eval_entry)
@@ -514,28 +826,38 @@ def train_mappo(args, checkpoint_path: Path, tb_logger=None) -> Path:
                         tb_logger.log_scalar("train_eval/deadlock_rate", float(mid_metrics["deadlock_rate"]), ep)
                         tb_logger.log_scalar("train_eval/episode_len", float(mid_metrics["episode_len"]), ep)
                         tb_logger.log_scalar("train_eval/total_reward", float(mid_metrics["total_reward"]), ep)
-                    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-                    torch.save(
-                        {
-                            "model_state": model.state_dict(),
-                            "obs_dim": obs_dim,
-                            "action_dim": 5,
-                            "kind": "mappo",
-                        },
-                        checkpoint_path,
+                    _save_checkpoint(
+                        checkpoint_path=checkpoint_path,
+                        base_encoder=base_encoder,
+                        tree_encoder=tree_encoder,
+                        fuse=fuse,
+                        head=head,
+                        optimizer=optimizer,
+                        base_dim=base_dim,
                     )
 
+            batch = _build_ppo_batch(
+                episodes=episodes_block,
+                gamma=float(args.gamma),
+                gae_lambda=0.95,
+                base_dim=base_dim,
+                device=device,
+            )
             update_stats = _ppo_update(
-                model=model,
-                opt=opt,
-                buffer=buffer,
-                ppo_epochs=args.mappo_ppo_epochs,
-                batch_size=args.mappo_batch_size,
-                entropy_coef=args.mappo_entropy_coef,
-                value_coef=args.mappo_value_coef,
-                clip_eps=args.mappo_clip_eps,
-                target_kl=args.mappo_target_kl,
-                kl_stop_factor=args.mappo_kl_stop_factor,
+                base_encoder=base_encoder,
+                tree_encoder=tree_encoder,
+                fuse=fuse,
+                head=head,
+                optimizer=optimizer,
+                batch=batch,
+                ppo_epochs=int(args.mappo_ppo_epochs),
+                batch_size=int(args.mappo_batch_size),
+                entropy_coef=float(args.mappo_entropy_coef),
+                value_coef=float(args.mappo_value_coef),
+                clip_eps=float(args.mappo_clip_eps),
+                max_grad_norm=5.0,
+                target_kl=float(args.mappo_target_kl),
+                kl_stop_factor=float(args.mappo_kl_stop_factor),
             )
             if update_stats is None:
                 continue
@@ -623,16 +945,20 @@ def train_mappo(args, checkpoint_path: Path, tb_logger=None) -> Path:
 
     print("\n[Train] Final eval ...")
     final_metrics = _eval_model(
-        model=model,
+        base_encoder=base_encoder,
+        tree_encoder=tree_encoder,
+        fuse=fuse,
+        head=head,
         obs_builder=obs_builder,
         cfg=cfg,
         env_source=args.env_source,
         pkl_files=pkl_files,
-        obs_dim=obs_dim,
+        base_dim=base_dim,
         n_episodes=int(getattr(args, "mappo_mid_eval_episodes", 10)),
         max_steps=args.max_episode_steps,
         seed_base=args.seed + 999999,
         greedy=bool(getattr(args, "mappo_eval_greedy", False)),
+        reward_shaper=reward_shaper,
     )
     eval_log.append({"kind": "final", "episode": args.episodes, **final_metrics})
     if tb_logger is not None:
@@ -641,38 +967,38 @@ def train_mappo(args, checkpoint_path: Path, tb_logger=None) -> Path:
         tb_logger.log_scalar("train_eval/episode_len", float(final_metrics["episode_len"]), args.episodes)
         tb_logger.log_scalar("train_eval/total_reward", float(final_metrics["total_reward"]), args.episodes)
 
-    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(
-        {
-            "model_state": model.state_dict(),
-            "obs_dim": obs_dim,
-            "action_dim": 5,
-            "kind": "mappo",
-        },
-        checkpoint_path,
+    _save_checkpoint(
+        checkpoint_path=checkpoint_path,
+        base_encoder=base_encoder,
+        tree_encoder=tree_encoder,
+        fuse=fuse,
+        head=head,
+        optimizer=optimizer,
+        base_dim=base_dim,
     )
+
     feature_mean = total_feature_sum / max(1, total_feature_count)
     feature_var = max(0.0, total_feature_sq_sum / max(1, total_feature_count) - feature_mean * feature_mean)
     feature_std = feature_var ** 0.5
     mask_active_ratio = total_mask_active / max(1.0, total_mask_count)
     action_total = int(total_action_hist.sum().item())
-    action_hist_text = ", ".join(
-        f"a{idx}={int(count)}" for idx, count in enumerate(total_action_hist.tolist())
-    )
+    action_hist_text = ", ".join(f"a{idx}={int(count)}" for idx, count in enumerate(total_action_hist.tolist()))
+
     if tb_logger is not None:
         tb_logger.log_mappo_summary(
-            obs_dim=obs_dim,
+            obs_dim=base_dim,
             feature_mean=feature_mean,
             feature_std=feature_std,
             mask_active_ratio=mask_active_ratio,
             actions_total=action_total,
             action_hist=[int(x) for x in total_action_hist.tolist()],
         )
+
     print(
         format_console_row(
             "summary",
             "mappo",
-            obs_dim=obs_dim,
+            obs_dim=base_dim,
             feature_mean=feature_mean,
             feature_std=feature_std,
             mask_active_ratio=mask_active_ratio,
@@ -692,5 +1018,6 @@ def train_mappo(args, checkpoint_path: Path, tb_logger=None) -> Path:
                 f"deadlock={float(entry['deadlock_rate']):.3f}  "
                 f"rew={float(entry['total_reward']):+.1f}"
             )
+
     print(format_console_row("checkpoint", "mappo", path=str(checkpoint_path)))
     return checkpoint_path
