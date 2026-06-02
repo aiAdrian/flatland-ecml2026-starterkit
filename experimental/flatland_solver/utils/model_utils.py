@@ -13,6 +13,17 @@ def _unwrap_observation_vector(observation):
 
 
 def infer_obs_dim(observation, default: int = 36) -> int:
+    # Structured observations are tuples: (base_features, opp_handles, tree_payload).
+    # For these, use the true base vector length and do not apply fast_tree heuristics.
+    if (
+        isinstance(observation, (tuple, list))
+        and len(observation) >= 3
+        and isinstance(observation[1], list)
+        and isinstance(observation[2], dict)
+    ):
+        base = torch.as_tensor(observation[0], dtype=torch.float32).flatten()
+        return int(base.numel()) if base.numel() > 0 else int(default)
+
     vec = torch.as_tensor(_unwrap_observation_vector(observation), dtype=torch.float32).flatten()
     if vec.numel() <= 0:
         return int(default)
