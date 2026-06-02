@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 import importlib.util
+import json
 from pathlib import Path
 import sys
 
@@ -28,6 +29,15 @@ class SolverConfig:
     max_rails_between_cities: int = 2
     max_rail_pairs_in_city: int = 2
     seed: int = 42
+
+
+@dataclass(frozen=True)
+class PklEnvMeta:
+    path: Path
+    width: int
+    height: int
+    n_agents: int
+    seed: int | None = None
 
 
 def build_env(cfg: SolverConfig, obs_builder) -> RailEnv:
@@ -78,6 +88,58 @@ def ensure_pkl_dataset(
 def list_pkl_dataset(path: str | Path) -> list[Path]:
     _EnvSpec, FlatlandEnvPersistUtil = _load_persist_util_classes()
     return FlatlandEnvPersistUtil.list_pickles(path)
+
+
+def _parse_pkl_meta_from_name(p: Path) -> PklEnvMeta | None:
+    # Expected legacy stem prefix format: <width>x<height>x<n_agents>_...
+    stem = p.stem
+    prefix = stem.split("_")[0]
+    parts = prefix.split("x")
+    if len(parts) != 3 or not all(part.isdigit() for part in parts):
+        return None
+    width = int(parts[0])
+    height = int(parts[1])
+    n_agents = int(parts[2])
+
+    # Optional: if filename carries a trailing seed token like *_seed1234
+    seed = None
+    for token in stem.split("_"):
+        if token.startswith("seed") and token[4:].isdigit():
+            seed = int(token[4:])
+            break
+
+    return PklEnvMeta(path=p, width=width, height=height, n_agents=n_agents, seed=seed)
+
+
+def list_pkl_dataset_meta(path: str | Path) -> list[PklEnvMeta]:
+    metas: list[PklEnvMeta] = []
+    for p in list_pkl_dataset(path):
+        m = _parse_pkl_meta_from_name(Path(p))
+        if m is not None:
+            metas.append(m)
+    return metas
+
+
+def write_pkl_metadata_index(path: str | Path, index_name: str = "pkl_index.json") -> Path:
+    base = Path(path)
+    base.mkdir(parents=True, exist_ok=True)
+    metas = list_pkl_dataset_meta(base)
+    payload = {
+        "count": len(metas),
+        "entries": [
+            {
+                "path": str(m.path),
+                "width": m.width,
+                "height": m.height,
+                "n_agents": m.n_agents,
+                "seed": m.seed,
+            }
+            for m in metas
+        ],
+    }
+    out = base / index_name
+    out.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return out
 
 
 def build_env_from_pkl(pkl_path: str | Path, obs_builder) -> RailEnv:

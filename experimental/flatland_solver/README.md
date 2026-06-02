@@ -238,6 +238,68 @@ Notes:
 - `--init-checkpoint` is used by MAPPO to warmstart model weights from BC.
 - Keep `--obs-variant` consistent between recording and BC training for best results.
 
+### Full Training (Legacy-Close MAPPO Loop)
+
+This is the recommended end-to-end run when you want legacy-like MAPPO behavior
+(collect rollout episodes first, then PPO K-epoch mini-batch updates, with
+mid-training eval checkpoints).
+
+```bash
+cd experimental/flatland_solver
+
+# 0) clean start
+rm -rf pkl_envs checkpoints datasets runs
+
+# 1) generate PKL curriculum cache (+ metadata index pkl_envs/pkl_index.json)
+python main.py --prepare-pkls --prepare-only \
+  --agent-curriculum 1 2 3 4 5 7 10 20 \
+  --pkl-num-envs-per-agent 25
+
+# 2) record DLA demonstrations once
+python main.py --mode record --policy bc \
+  --env-source pkl --pkl-dir pkl_envs \
+  --episodes 200 --max-episode-steps 300 \
+  --obs-variant decision_point \
+  --dataset-path datasets/dla_dataset.pt
+
+# 3) offline BC optimization
+python main.py --mode train --policy bc \
+  --dataset-path datasets/dla_dataset.pt \
+  --train-epochs 20 --batch-size 256 --lr 3e-4 \
+  --bc-checkpoint checkpoints/bc.pt
+
+# 4) MAPPO warmstart + legacy-close train loop
+python main.py --mode train --policy mappo \
+  --env-source pkl --pkl-dir pkl_envs \
+  --episodes 200 --train-epochs 5 --max-episode-steps 300 \
+  --obs-variant spawn_aware \
+  --init-checkpoint checkpoints/bc.pt \
+  --mappo-checkpoint checkpoints/mappo.pt \
+  --mappo-rollout-episodes 10 \
+  --mappo-ppo-epochs 4 \
+  --mappo-batch-size 256 \
+  --mappo-entropy-coef 0.02 \
+  --mappo-value-coef 0.5 \
+  --mappo-clip-eps 0.2 \
+  --mappo-target-kl 0.05 \
+  --mappo-kl-stop-factor 1.5 \
+  --mappo-done-window 50 \
+  --mappo-mid-eval-every 50 \
+  --mappo-mid-eval-episodes 10 \
+  --mappo-eval-greedy
+```
+
+After training:
+
+```bash
+# evaluate final checkpoints
+python main.py --mode eval --policy bc --env-source pkl --pkl-dir pkl_envs --episodes 20 --obs-variant decision_point
+python main.py --mode eval --policy mappo --env-source pkl --pkl-dir pkl_envs --episodes 20 --obs-variant spawn_aware
+
+# inspect TensorBoard
+tensorboard --logdir runs
+```
+
 ## KPI Artifacts
 
 - TensorBoard logs: `runs/`

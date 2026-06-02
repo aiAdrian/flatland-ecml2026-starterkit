@@ -23,6 +23,7 @@ from utils.env_factory import (
     build_env_from_pkl,
     ensure_pkl_dataset,
     list_pkl_dataset,
+    write_pkl_metadata_index,
 )
 from utils.progress import RollingDoneRatio, format_console_row, format_fixed_metrics, make_progress_bar
 from utils.tb_logger import TBLogger, format_args_text
@@ -125,10 +126,12 @@ def maybe_prepare_pkl_dataset(args) -> None:
             print(f"[pkl] Using {n_cached} cached environments at {args.pkl_dir}")
 
         all_pkls_after = list_pkl_dataset(args.pkl_dir)
+        index_path = write_pkl_metadata_index(args.pkl_dir)
         print(
             f"[pkl] dir={args.pkl_dir} generated={written_total} total={len(all_pkls_after)} "
             f"expected_total={expected_total}"
         )
+        print(f"[pkl] metadata_index={index_path}")
         return
 
     written = ensure_pkl_dataset(
@@ -140,10 +143,12 @@ def maybe_prepare_pkl_dataset(args) -> None:
         overwrite=args.pkl_overwrite,
     )
     all_pkls = list_pkl_dataset(args.pkl_dir)
+    index_path = write_pkl_metadata_index(args.pkl_dir)
     print(
         f"[pkl] dir={args.pkl_dir} generated={len(written)} total={len(all_pkls)} "
         f"seed_start={args.pkl_seed_start}"
     )
+    print(f"[pkl] metadata_index={index_path}")
 
 
 def run_eval(args) -> EvalStats:
@@ -168,6 +173,10 @@ def run_eval(args) -> EvalStats:
     total_steps = 0
     total_reward_sum = 0.0
     total_deadlock_rate = 0.0
+    done_rates = []
+    deadlock_rates = []
+    episode_lengths = []
+    rewards_list = []
     rolling_done = RollingDoneRatio(window_size=20)
     bar = make_progress_bar(total=args.episodes, desc=f"Eval[{args.policy}]")
 
@@ -219,6 +228,10 @@ def run_eval(args) -> EvalStats:
         total_steps += steps
         total_reward_sum += episode_reward
         total_deadlock_rate += deadlock_rate
+        done_rates.append(episode_done / max(1, env.get_num_agents()))
+        deadlock_rates.append(deadlock_rate)
+        episode_lengths.append(float(steps))
+        rewards_list.append(float(episode_reward))
         rolling_done.update(episode_done, env.get_num_agents())
         bar.set_secondary(rolling_done.window_ratio(), rolling_done.format_postfix())
 
@@ -231,10 +244,12 @@ def run_eval(args) -> EvalStats:
                 deadlock_rate=deadlock_rate,
             )
 
-        bar.set_postfix_str(f"s={steps} r={episode_reward:+.1f}")
+        running_done = sum(done_rates) / max(1, len(done_rates))
+        running_dlk = sum(deadlock_rates) / max(1, len(deadlock_rates))
+        bar.set_postfix_str(f"agents={episode_done}/{env.get_num_agents()} done={running_done:>4.0%} dlk={running_dlk:>4.0%} s={steps} r={episode_reward:+.1f}")
         bar.update(1)
 
-        print(format_console_row("eval", args.policy, ep=f"{episode + 1}/{args.episodes}", steps=steps, done=f"{episode_done}/{env.get_num_agents()}", reward=episode_reward))
+        print(format_console_row("eval", args.policy, ep=f"{episode + 1}/{args.episodes}", steps=steps, done=f"{episode_done}/{env.get_num_agents()}", deadlock=deadlock_rate, reward=episode_reward))
         if args.policy == "dla" and hasattr(policy, "get_debug_stats"):
             stats = policy.get_debug_stats()
             print(format_console_row("eval", "dla", calls_total=stats.get("calls_total", 0), calls_episode=stats.get("calls_episode", 0)))
@@ -252,6 +267,19 @@ def run_eval(args) -> EvalStats:
             avg_reward=total_reward_sum / max(1, args.episodes),
             avg_deadlock_rate=total_deadlock_rate / max(1, args.episodes),
         )
+
+    # Legacy-like condensed eval result block.
+    mean_done = sum(done_rates) / max(1, len(done_rates))
+    mean_dl = sum(deadlock_rates) / max(1, len(deadlock_rates))
+    mean_len = sum(episode_lengths) / max(1, len(episode_lengths))
+    mean_rew = sum(rewards_list) / max(1, len(rewards_list))
+    print("-" * 60)
+    print(f"[Eval]  {args.policy}  RESULT")
+    print(f"  done_rate     = {mean_done:.3f}")
+    print(f"  deadlock_rate = {mean_dl:.3f}")
+    print(f"  episode_len   = {mean_len:.1f}")
+    print(f"  total_reward  = {mean_rew:+.2f}")
+    print()
 
     return EvalStats(
         episodes=args.episodes,
@@ -317,6 +345,30 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--train-epochs", type=int, default=3)
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--gamma", type=float, default=0.99)
+    parser.add_argument("--mappo-rollout-episodes", type=int, default=10,
+                        help="Episodes to collect before one PPO update block (non-curriculum)")
+    parser.add_argument("--mappo-ppo-epochs", type=int, default=4,
+                        help="Number of PPO epochs per update block")
+    parser.add_argument("--mappo-batch-size", type=int, default=256,
+                        help="Mini-batch size for MAPPO PPO updates")
+    parser.add_argument("--mappo-entropy-coef", type=float, default=0.02,
+                        help="Entropy regularization coefficient for MAPPO PPO loss")
+    parser.add_argument("--mappo-value-coef", type=float, default=0.5,
+                        help="Value loss coefficient for MAPPO PPO loss")
+    parser.add_argument("--mappo-clip-eps", type=float, default=0.2,
+                        help="PPO clipping epsilon")
+    parser.add_argument("--mappo-target-kl", type=float, default=0.05,
+                        help="Target KL for legacy-style early-stop guard")
+    parser.add_argument("--mappo-kl-stop-factor", type=float, default=1.5,
+                        help="Early-stop threshold factor applied to target KL")
+    parser.add_argument("--mappo-done-window", type=int, default=50,
+                        help="Rolling window size for done-rate metric in MAPPO train logs")
+    parser.add_argument("--mappo-mid-eval-every", type=int, default=0,
+                        help="Run MAPPO mid-training eval every N collected episodes (0 disables)")
+    parser.add_argument("--mappo-mid-eval-episodes", type=int, default=10,
+                        help="Number of episodes for each mid/final MAPPO eval run")
+    parser.add_argument("--mappo-eval-greedy", action="store_true",
+                        help="Use greedy argmax actions during MAPPO mid/final eval")
     parser.add_argument("--checkpoint-dir", type=Path, default=Path("checkpoints"))
     parser.add_argument("--runs-dir", type=Path, default=Path("runs"))
     parser.add_argument("--no-tensorboard", action="store_true")

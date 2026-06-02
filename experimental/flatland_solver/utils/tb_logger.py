@@ -34,6 +34,9 @@ class TBLogger:
     def log_hparams_text(self, params_text: str):
         self.writer.add_text("run/params", params_text, global_step=0)
 
+    def log_scalar(self, tag: str, value: float, step: int):
+        self.writer.add_scalar(str(tag), float(value), int(step))
+
     def log_eval_episode(
         self,
         episode_idx: int,
@@ -71,6 +74,8 @@ class TBLogger:
         value_loss: float,
         entropy: Optional[float] = None,
         approx_kl: Optional[float] = None,
+        ratio: Optional[float] = None,
+        clip_frac: Optional[float] = None,
     ):
         self.writer.add_scalar("ppo/p_loss", float(policy_loss), epoch_idx)
         self.writer.add_scalar("ppo/v_loss", float(value_loss), epoch_idx)
@@ -78,6 +83,10 @@ class TBLogger:
             self.writer.add_scalar("ppo/entropy", float(entropy), epoch_idx)
         if approx_kl is not None:
             self.writer.add_scalar("ppo/approx_kl", float(approx_kl), epoch_idx)
+        if ratio is not None:
+            self.writer.add_scalar("ppo/ratio", float(ratio), epoch_idx)
+        if clip_frac is not None:
+            self.writer.add_scalar("ppo/clip_frac", float(clip_frac), epoch_idx)
 
     def log_mappo_episode(
         self,
@@ -87,6 +96,7 @@ class TBLogger:
         total_reward: float,
         n_agents: int,
         deadlock_rate: Optional[float] = None,
+        done_rolling: Optional[float] = None,
         policy_loss: Optional[float] = None,
         value_loss: Optional[float] = None,
     ):
@@ -96,6 +106,8 @@ class TBLogger:
         self.writer.add_scalar("ppo_episode/n_agents", float(n_agents), episode_idx)
         if deadlock_rate is not None:
             self.writer.add_scalar("ppo_episode/deadlock_rate", float(deadlock_rate), episode_idx)
+        if done_rolling is not None:
+            self.writer.add_scalar("ppo_episode/done_rolling", float(done_rolling), episode_idx)
         if policy_loss is not None:
             self.writer.add_scalar("ppo_episode/p_loss", float(policy_loss), episode_idx)
         if value_loss is not None:
