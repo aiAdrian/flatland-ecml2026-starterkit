@@ -178,9 +178,15 @@ cython_debug/
 /experimental/flatland_minimal_project_NOT_WORKING_TRANSFORM
 /experimental/flatland_solver/runs
 /experimental/flatland_solver/checkpoints
+/experimental/flatland_solver/generated_envs
 /experimental/flatland_solver/pkl_envs
 /experimental/flatland_solver/_legacy_pdf_excerpt.txt
 .vscode/
 /debug-environments
 /debug-environments.zip
+
+# Training artifacts (generic)
+generated_envs/
+runs/
+checkpoints/
 
