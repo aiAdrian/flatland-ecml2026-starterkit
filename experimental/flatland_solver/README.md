@@ -48,10 +48,10 @@ python main.py --mode eval --policy dla --episodes 3
 python main.py --mode eval --policy dla --episodes 1 --rendering
 
 # prepare reusable PKL scenarios for faster repeated training/eval
-python main.py --prepare-pkls --prepare-only --pkl-dir pkl_envs --pkl-count 64 --pkl-seed-start 1000
+python main.py --prepare-pkls --prepare-only --pkl-dir generated_envs --pkl-count 64 --pkl-seed-start 1000
 
 # curriculum-style cache (legacy behavior): N envs per agent-count
-python main.py --prepare-pkls --prepare-only --pkl-dir pkl_envs \
+python main.py --prepare-pkls --prepare-only --pkl-dir generated_envs \
   --agent-curriculum 1 2 3 4 5 7 10 15 20 --pkl-num-envs-per-agent 5
 
 # train BC and evaluate from checkpoint
@@ -59,7 +59,7 @@ python main.py --mode train --policy bc --episodes 2 --train-epochs 1
 python main.py --mode eval --policy bc --episodes 2
 
 # same with PKL-backed environments + debug checks
-python main.py --mode train --policy bc --env-source pkl --pkl-dir pkl_envs --episodes 3 --train-epochs 2 --debug-checks
+python main.py --mode train --policy bc --env-source pkl --pkl-dir generated_envs --episodes 3 --train-epochs 2 --debug-checks
 
 # train MAPPO and evaluate from checkpoint
 python main.py --mode train --policy mappo --episodes 2 --train-epochs 1
@@ -72,7 +72,7 @@ python main.py --mode train --policy mappo --curriculum-spec 5 --curriculum-repe
 python main.py --mode train --policy mappo --curriculum-spec 1x5,5x5 --episodes 10 --train-epochs 1
 
 # MAPPO diagnostics from legacy doc guidance (entropy / approx_kl)
-python main.py --mode train --policy mappo --env-source pkl --pkl-dir pkl_envs --episodes 3 --train-epochs 2 --debug-checks
+python main.py --mode train --policy mappo --env-source pkl --pkl-dir generated_envs --episodes 3 --train-epochs 2 --debug-checks
 
 # tensorboard (runs include mode/policy/params in folder name)
 tensorboard --logdir runs
@@ -122,15 +122,15 @@ Run this block to verify PKL generation, BC/MAPPO train+eval, and KPI artifacts:
 cd experimental/flatland_solver
 
 # 1) reusable PKL scenarios
-python main.py --prepare-pkls --prepare-only --pkl-dir pkl_envs --pkl-count 32 --pkl-seed-start 1000
+python main.py --prepare-pkls --prepare-only --pkl-dir generated_envs --pkl-count 32 --pkl-seed-start 1000
 
 # 2) BC train + eval on PKL envs
-python main.py --mode train --policy bc --env-source pkl --pkl-dir pkl_envs --episodes 3 --train-epochs 2 --max-episode-steps 60 --debug-checks
-python main.py --mode eval --policy bc --env-source pkl --pkl-dir pkl_envs --episodes 3 --max-episode-steps 60
+python main.py --mode train --policy bc --env-source pkl --pkl-dir generated_envs --episodes 3 --train-epochs 2 --max-episode-steps 60 --debug-checks
+python main.py --mode eval --policy bc --env-source pkl --pkl-dir generated_envs --episodes 3 --max-episode-steps 60
 
 # 3) MAPPO train + eval on PKL envs
-python main.py --mode train --policy mappo --env-source pkl --pkl-dir pkl_envs --episodes 3 --train-epochs 2 --max-episode-steps 60 --debug-checks
-python main.py --mode eval --policy mappo --env-source pkl --pkl-dir pkl_envs --episodes 3 --max-episode-steps 60
+python main.py --mode train --policy mappo --env-source pkl --pkl-dir generated_envs --episodes 3 --train-epochs 2 --max-episode-steps 60 --debug-checks
+python main.py --mode eval --policy mappo --env-source pkl --pkl-dir generated_envs --episodes 3 --max-episode-steps 60
 
 # 4) tensorboard
 tensorboard --logdir runs
@@ -162,7 +162,7 @@ python main.py --prepare-pkls --prepare-only \
   --pkl-count 500 --n-agents 10
 
 # Clear all generated PKLs and checkpoints (start fresh)
-rm -rf pkl_envs checkpoints
+rm -rf generated_envs checkpoints
 
 # Variable Agent-Counts: 25 PKLs per agent-count (8 counts = 200 total)
 python main.py --prepare-pkls --prepare-only \
@@ -186,16 +186,16 @@ python main.py --prepare-pkls --prepare-only \
   --pkl-num-envs-per-agent 50
 ```
 
-Both approaches generate environments in `pkl_envs/` and are used identically during training/evaluation:
+Both approaches generate environments in `generated_envs/` and are used identically during training/evaluation:
 
 ```bash
 # Train on ANY mix of pre-generated PKLs
 python main.py --mode train --policy bc --env-source pkl \
-  --pkl-dir pkl_envs --episodes 200 --train-epochs 5
+  --pkl-dir generated_envs --episodes 200 --train-epochs 5
 
 # Eval on ANY mix of pre-generated PKLs
 python main.py --mode eval --policy bc --env-source pkl \
-  --pkl-dir pkl_envs --episodes 20
+  --pkl-dir generated_envs --episodes 20
 ```
 
 The agent curriculum approach creates robust policies that generalize across agent counts without needing curriculum sampling during training—all agent-counts are mixed in each epoch.
@@ -203,6 +203,23 @@ The agent curriculum approach creates robust policies that generalize across age
 ## Curriculum Selection: Repeat vs. Sequence Mode
 
 Training can use **agent curriculum** to expose policies to varying agent counts. Two modes are supported:
+
+### Array Forms (How Curriculum Is Built)
+
+Use one of these two forms:
+
+- Single value repeated: `a -> [a, a, a, ..., a]` (n times)
+- Block sequence: `[a_1 x n_1, a_2 x n_2, ..., a_m x n_m]`
+
+Concrete examples:
+
+- `a = 5`, `n = 10` -> `[5, 5, 5, 5, 5, 5, 5, 5, 5, 5]`
+- `3x2,5x3,10x1` -> `[3, 3, 5, 5, 5, 10]`
+
+CLI mapping:
+
+- Repeat form: `--curriculum-spec 5 --curriculum-repeat 10`
+- Sequence form: `--curriculum-spec 3x2,5x3,10x1`
 
 ### Repeat Mode (Single Agent Count)
 
@@ -216,6 +233,8 @@ python main.py --mode train --policy mappo \
 
 # Shorthand: generates [5]*10 curriculum
 ```
+
+You can read this as: `a = 5`, `n = 10` -> `[a] * n`.
 
 Use this for **homogeneous** training (all episodes have same complexity).
 
@@ -232,6 +251,8 @@ python main.py --mode train --policy mappo \
 # Generates [3]*10 + [5]*10 + [7]*5
 ```
 
+You can read this as: `[a_i x n_i]` blocks concatenated from left to right.
+
 Use this for **curriculum learning** (policy learns from simple→complex scenarios).
 
 ### Curriculum Selection with PKL Datasets
@@ -246,13 +267,13 @@ python main.py --prepare-pkls --prepare-only \
 
 # Train with repeat mode (all PKLs, randomly selected)
 python main.py --mode train --policy mappo \
-  --env-source pkl --pkl-dir pkl_envs \
+  --env-source pkl --pkl-dir generated_envs \
   --curriculum-spec 5 --curriculum-repeat 20 \
   --episodes 100
 
 # Train with sequence mode (curriculum marker printed at transitions)
 python main.py --mode train --policy mappo \
-  --env-source pkl --pkl-dir pkl_envs \
+  --env-source pkl --pkl-dir generated_envs \
   --curriculum-spec 1x10,3x10,5x10,10x10 \
   --episodes 40
 ```
@@ -275,7 +296,7 @@ Use this workflow to run DLA only once, then train BC for many epochs on a saved
 cd experimental/flatland_solver
 
 # Optional: clear generated caches and models
-rm -rf pkl_envs checkpoints datasets runs
+rm -rf generated_envs checkpoints datasets runs
 
 # 1) Build PKL cache (example: variable agent counts)
 python main.py --prepare-pkls --prepare-only \
@@ -284,7 +305,7 @@ python main.py --prepare-pkls --prepare-only \
 
 # 2) Record DLA dataset once (writes datasets/dla_dataset.pt)
 python main.py --mode record --policy bc \
-  --env-source pkl --pkl-dir pkl_envs \
+  --env-source pkl --pkl-dir generated_envs \
   --episodes 200 --max-episode-steps 300 \
   --obs-variant decision_point \
   --dataset-path datasets/dla_dataset.pt
@@ -297,7 +318,7 @@ python main.py --mode train --policy bc \
 
 # 4) MAPPO warmstart from BC checkpoint
 python main.py --mode train --policy mappo \
-  --env-source pkl --pkl-dir pkl_envs \
+  --env-source pkl --pkl-dir generated_envs \
   --episodes 200 --train-epochs 5 \
   --obs-variant spawn_aware \
   --init-checkpoint checkpoints/bc.pt \
@@ -321,16 +342,16 @@ mid-training eval checkpoints).
 cd experimental/flatland_solver
 
 # 0) clean start
-rm -rf pkl_envs checkpoints datasets runs
+rm -rf generated_envs checkpoints datasets runs
 
-# 1) generate PKL curriculum cache (+ metadata index pkl_envs/pkl_index.json)
+# 1) generate PKL curriculum cache (+ metadata index generated_envs/pkl_index.json)
 python main.py --prepare-pkls --prepare-only \
   --agent-curriculum 1 2 3 4 5 7 10 20 \
   --pkl-num-envs-per-agent 25
 
 # 2) record DLA demonstrations once
 python main.py --mode record --policy bc \
-  --env-source pkl --pkl-dir pkl_envs \
+  --env-source pkl --pkl-dir generated_envs \
   --episodes 200 --max-episode-steps 300 \
   --obs-variant decision_point \
   --dataset-path datasets/dla_dataset.pt
@@ -343,7 +364,7 @@ python main.py --mode train --policy bc \
 
 # 4) MAPPO warmstart + legacy-close train loop
 python main.py --mode train --policy mappo \
-  --env-source pkl --pkl-dir pkl_envs \
+  --env-source pkl --pkl-dir generated_envs \
   --episodes 200 --train-epochs 5 --max-episode-steps 300 \
   --obs-variant spawn_aware \
   --init-checkpoint checkpoints/bc.pt \
@@ -366,8 +387,8 @@ After training:
 
 ```bash
 # evaluate final checkpoints
-python main.py --mode eval --policy bc --env-source pkl --pkl-dir pkl_envs --episodes 20 --obs-variant decision_point
-python main.py --mode eval --policy mappo --env-source pkl --pkl-dir pkl_envs --episodes 20 --obs-variant spawn_aware
+python main.py --mode eval --policy bc --env-source pkl --pkl-dir generated_envs --episodes 20 --obs-variant decision_point
+python main.py --mode eval --policy mappo --env-source pkl --pkl-dir generated_envs --episodes 20 --obs-variant spawn_aware
 
 # inspect TensorBoard
 tensorboard --logdir runs
@@ -389,7 +410,7 @@ A shell script is provided to clean up all previous runs and generated data, the
 ```
 
 **What the script does:**
-1. Removes `runs/`, `pkl_envs/`, and `checkpoints/` directories to start fresh
+1. Removes `runs/`, `generated_envs/`, and `checkpoints/` directories to start fresh
 2. Runs random policy eval (baseline sanity check)
 3. Runs DLA policy eval (legacy heuristic baseline)
 4. Trains BC for 200 episodes × 5 epochs on `decision_point` observations
@@ -557,7 +578,7 @@ Example with all curriculum + MAPPO settings:
 
 ```bash
 python main.py --mode train --policy mappo \
-  --env-source pkl --pkl-dir pkl_envs \
+  --env-source pkl --pkl-dir generated_envs \
   --curriculum-spec 1x10,3x20,5x30 \
   --episodes 60 --train-epochs 3 \
   --mappo-rollout-episodes 10 \

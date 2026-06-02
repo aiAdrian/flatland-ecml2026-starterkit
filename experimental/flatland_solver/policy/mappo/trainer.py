@@ -699,7 +699,9 @@ def train_mappo(args, checkpoint_path: Path, tb_logger=None) -> Path:
             episodes_block: list[dict[str, Any]] = []
             block_collected = 0
 
-            # Detect curriculum transitions
+            # Detect curriculum transitions.
+            # `ep` is the global collected-episode counter and determines the
+            # currently active curriculum slot for the progress marker.
             if curriculum_mode and curriculum:
                 next_n_agents = curriculum[ep % len(curriculum)]
                 if next_n_agents != prev_n_agents:
@@ -709,6 +711,9 @@ def train_mappo(args, checkpoint_path: Path, tb_logger=None) -> Path:
             for block_i in range(target_rollout_eps):
                 if args.env_source == "pkl":
                     if curriculum_mode and grouped_pkls:
+                        # Curriculum next/iteration resolution happens here.
+                        # `block_i` advances inside the rollout block and is
+                        # mapped to the curriculum array via modulo.
                         n_agents_target = curriculum[block_i % len(curriculum)]
                         bucket = grouped_pkls.get(n_agents_target, [])
                         if bucket:
@@ -724,6 +729,7 @@ def train_mappo(args, checkpoint_path: Path, tb_logger=None) -> Path:
                     env = build_env_from_pkl(pkl_path, obs_builder=obs_builder)
                 else:
                     if curriculum_mode:
+                        # Same curriculum index logic for on-the-fly generation.
                         n_agents_target = curriculum[block_i % len(curriculum)]
                         sub_cfg = SolverConfig(
                             width=args.width,

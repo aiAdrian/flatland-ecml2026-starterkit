@@ -60,7 +60,8 @@ def parse_curriculum_spec(spec: str | None, mode: str = "auto") -> list[int] | N
         return [int(spec.strip())]
     
     if mode == "sequence":
-        # Parse "3x10,5x10,7x5" → [3]*10 + [5]*10 + [7]*5
+        # Parsing keeps left-to-right order from the spec string.
+        # Example: "3x2,5x2" -> [3, 3, 5, 5]
         result = []
         for part in spec.split(','):
             part = part.strip()
@@ -168,6 +169,10 @@ def maybe_prepare_pkl_dataset(args) -> None:
             )
             print(f"[pkl] Agent counts: {curriculum}")
             pkl_bar = make_progress_bar(total=len(curriculum), desc="PKL-Gen")
+            # Generation order is deterministic:
+            # 1) iterate agent counts in curriculum order,
+            # 2) generate `per_agent_envs` files for each entry,
+            # 3) seed_start is offset per curriculum position.
             for idx, n_agents in enumerate(curriculum):
                 sub_cfg = SolverConfig(
                     width=args.width,
