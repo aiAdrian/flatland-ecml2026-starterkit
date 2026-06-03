@@ -444,7 +444,7 @@ def _ppo_update(
             end=""
         )
         for k, v in stats.items():
-            print(f"\t{k:15s} {v[-1]:8.3f}", end="")
+            print(f"\t{k} {v[-1]:5.3f}", end="")
 
         print("")
         # ---------------------------------------------------
