@@ -635,7 +635,7 @@ def train_mappo(args, checkpoint_path: Path, tb_logger=None) -> Path:
         format_console_row(
             "config",
             "mappo",
-            epochs=args.train_epochs,
+            epochs=1,
             episodes=args.episodes,
             lr=args.lr,
             obs=args.obs_variant,
@@ -646,6 +646,7 @@ def train_mappo(args, checkpoint_path: Path, tb_logger=None) -> Path:
             batch_size=args.mappo_batch_size,
             max_steps=args.max_episode_steps,
             warmstart=warmstart_used,
+            requested_outer_epochs=int(getattr(args, "train_epochs", 1)),
         )
     )
 
@@ -669,7 +670,8 @@ def train_mappo(args, checkpoint_path: Path, tb_logger=None) -> Path:
     global_update_idx = 0
     eval_log: list[dict[str, Any]] = []
 
-    for epoch in range(args.train_epochs):
+    outer_passes = 1
+    for epoch in range(outer_passes):
         epoch_policy_loss = 0.0
         epoch_value_loss = 0.0
         epoch_entropy = 0.0
@@ -678,8 +680,8 @@ def train_mappo(args, checkpoint_path: Path, tb_logger=None) -> Path:
         epoch_clip_frac = 0.0
         n_updates = 0
 
-        rolling_done = RollingDoneRatio(window_size=max(1, int(getattr(args, "mappo_done_window", 50))))
-        bar = make_progress_bar(total=args.episodes, desc=f"MAPPO[{epoch + 1}/{args.train_epochs}]")
+        rolling_done = RollingDoneRatio(window_size=max(1, int(getattr(args, "mappo_done_window", 20))))
+        bar = make_progress_bar(total=args.episodes, desc="MAPPO")
 
         ep = 0
         last_update_stats = {
@@ -753,7 +755,7 @@ def train_mappo(args, checkpoint_path: Path, tb_logger=None) -> Path:
                     fuse=fuse,
                     head=head,
                     base_dim=base_dim,
-                    seed=args.seed + epoch * 1000 + ep,
+                    seed=args.seed + ep,
                     max_steps=args.max_episode_steps,
                     reward_shaper=reward_shaper,
                 )
@@ -775,8 +777,8 @@ def train_mappo(args, checkpoint_path: Path, tb_logger=None) -> Path:
                 ep_reward = float(episode["ep_reward"])
                 done_rate = ep_done / max(1, n_agents_ep)
                 done_history.append(done_rate)
-                done_window = max(1, int(getattr(args, "mappo_done_window", 50)))
-                recent_done_50 = sum(done_history[-done_window:]) / max(1, len(done_history[-done_window:]))
+                done_window = max(1, int(getattr(args, "mappo_done_window", 20)))
+                recent_done_rolling_ration = sum(done_history[-done_window:]) / max(1, len(done_history[-done_window:]))
 
                 rolling_done.update(ep_done, n_agents_ep)
                 bar.set_secondary(rolling_done.window_ratio(), rolling_done.format_postfix())
@@ -803,7 +805,7 @@ def train_mappo(args, checkpoint_path: Path, tb_logger=None) -> Path:
                 )
 
                 if tb_logger is not None:
-                    ep_idx = epoch * max(1, args.episodes) + ep
+                    ep_idx = ep
                     tb_logger.log_mappo_episode(
                         episode_idx=ep_idx,
                         done_rate=done_rate,
@@ -811,7 +813,7 @@ def train_mappo(args, checkpoint_path: Path, tb_logger=None) -> Path:
                         total_reward=ep_reward,
                         n_agents=n_agents_ep,
                         deadlock_rate=float(episode["deadlock_rate"]),
-                        done_rolling=recent_done_50,
+                        done_rolling=recent_done_rolling_ration,
                         policy_loss=last_update_stats["p_loss"],
                         value_loss=last_update_stats["v_loss"],
                     )
@@ -840,7 +842,7 @@ def train_mappo(args, checkpoint_path: Path, tb_logger=None) -> Path:
                         base_dim=base_dim,
                         n_episodes=int(getattr(args, "mappo_mid_eval_episodes", 10)),
                         max_steps=args.max_episode_steps,
-                        seed_base=args.seed + epoch * 100000 + ep,
+                        seed_base=args.seed + ep,
                         greedy=bool(getattr(args, "mappo_eval_greedy", False)),
                         reward_shaper=reward_shaper,
                     )
@@ -883,8 +885,8 @@ def train_mappo(args, checkpoint_path: Path, tb_logger=None) -> Path:
                 max_grad_norm=5.0,
                 target_kl=float(args.mappo_target_kl),
                 kl_stop_factor=float(args.mappo_kl_stop_factor),
-                epoch=epoch + 1,
-                total_epochs=args.train_epochs,
+                epoch=1,
+                total_epochs=1,
             )
             if update_stats is None:
                 continue
@@ -910,7 +912,7 @@ def train_mappo(args, checkpoint_path: Path, tb_logger=None) -> Path:
                 format_console_row(
                     "update",
                     "mappo",
-                    epoch=f"{epoch + 1}/{args.train_epochs}",
+                    epoch="1/1",
                     upd=global_update_idx,
                     n_rollout=block_collected,
                     n_samples=int(update_stats["n_samples"]),
@@ -936,7 +938,7 @@ def train_mappo(args, checkpoint_path: Path, tb_logger=None) -> Path:
                 tb_logger.log_scalar("ppo_update/early_stop_skips", float(update_stats.get("early_stop_skips", 0.0)), global_update_idx)
 
         if n_updates == 0:
-            print(format_console_row("epoch", "mappo", epoch=f"{epoch + 1}/{args.train_epochs}", status="no_batches"))
+            print(format_console_row("epoch", "mappo", epoch="1/1", status="no_batches"))
         else:
             avg_p = epoch_policy_loss / n_updates
             avg_v = epoch_value_loss / n_updates
@@ -948,7 +950,7 @@ def train_mappo(args, checkpoint_path: Path, tb_logger=None) -> Path:
                 format_console_row(
                     "epoch",
                     "mappo",
-                    epoch=f"{epoch + 1}/{args.train_epochs}",
+                    epoch="1/1",
                     policy_loss=avg_p,
                     value_loss=avg_v,
                     entropy=avg_entropy,
@@ -959,7 +961,7 @@ def train_mappo(args, checkpoint_path: Path, tb_logger=None) -> Path:
             )
             if tb_logger is not None:
                 tb_logger.log_mappo_epoch(
-                    epoch + 1,
+                    1,
                     policy_loss=avg_p,
                     value_loss=avg_v,
                     entropy=avg_entropy,

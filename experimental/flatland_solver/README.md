@@ -69,31 +69,31 @@ python main.py --prepare-pkls --prepare-only --pkl-dir generated_envs \
   --agent-curriculum 1 2 3 4 5 7 10 15 20 --pkl-num-envs-per-agent 5
 
 # train BC and evaluate from checkpoint
-python main.py --mode train --policy bc --episodes 2 --train-epochs 1
+python main.py --mode train --policy bc --episodes 2
 python main.py --mode eval --policy bc --episodes 2
 
 # same with PKL-backed environments + debug checks
-python main.py --mode train --policy bc --env-source pkl --pkl-dir generated_envs --episodes 3 --train-epochs 2 --debug-checks
+python main.py --mode train --policy bc --env-source pkl --pkl-dir generated_envs --episodes 3 --debug-checks
 
 # train MAPPO and evaluate from checkpoint
-python main.py --mode train --policy mappo --episodes 2 --train-epochs 1
+python main.py --mode train --policy mappo --episodes 2
 python main.py --mode eval --policy mappo --episodes 2
 
 # MAPPO with curriculum (repeat mode: same agent count)
-python main.py --mode train --policy mappo --curriculum-spec 5 --curriculum-repeat 10 --episodes 10 --train-epochs 1
+python main.py --mode train --policy mappo --curriculum-spec 5 --curriculum-repeat 10 --episodes 10
 
 # MAPPO with curriculum (sequence mode: varying agent counts)
-python main.py --mode train --policy mappo --curriculum-spec 1x5,5x5 --episodes 10 --train-epochs 1
+python main.py --mode train --policy mappo --curriculum-spec 1x5,5x5 --episodes 10
 
 # MAPPO diagnostics (entropy / approx_kl)
-python main.py --mode train --policy mappo --env-source pkl --pkl-dir generated_envs --episodes 3 --train-epochs 2 --debug-checks
+python main.py --mode train --policy mappo --env-source pkl --pkl-dir generated_envs --episodes 3 --debug-checks
 
 # tensorboard (runs include mode/policy/params in folder name)
 tensorboard --logdir runs
 
 # integrated observation variants
-python main.py --mode train --policy bc --obs-variant decision_point --episodes 2 --train-epochs 1
-python main.py --mode train --policy mappo --obs-variant spawn_aware --episodes 2 --train-epochs 1
+python main.py --mode train --policy bc --obs-variant decision_point --episodes 2
+python main.py --mode train --policy mappo --obs-variant spawn_aware --episodes 2
 python main.py --mode eval --policy mappo --obs-variant conflict_aware --episodes 1
 ```
 
@@ -130,11 +130,11 @@ cd experimental/flatland_solver
 python main.py --prepare-pkls --prepare-only --pkl-dir generated_envs --pkl-count 32 --pkl-seed-start 1000
 
 # 2) BC train + eval on PKL envs
-python main.py --mode train --policy bc --env-source pkl --pkl-dir generated_envs --episodes 3 --train-epochs 2 --max-episode-steps 60 --debug-checks
+python main.py --mode train --policy bc --env-source pkl --pkl-dir generated_envs --episodes 3 --max-episode-steps 60 --debug-checks
 python main.py --mode eval --policy bc --env-source pkl --pkl-dir generated_envs --episodes 3 --max-episode-steps 60
 
 # 3) MAPPO train + eval on PKL envs
-python main.py --mode train --policy mappo --env-source pkl --pkl-dir generated_envs --episodes 3 --train-epochs 2 --max-episode-steps 60 --debug-checks
+python main.py --mode train --policy mappo --env-source pkl --pkl-dir generated_envs --episodes 3 --max-episode-steps 60 --debug-checks
 python main.py --mode eval --policy mappo --env-source pkl --pkl-dir generated_envs --episodes 3 --max-episode-steps 60
 
 # 4) tensorboard
@@ -196,14 +196,14 @@ Both approaches generate environments in `generated_envs/` and are used identica
 ```bash
 # Train on ANY mix of pre-generated PKLs
 python main.py --mode train --policy bc --env-source pkl \
-  --pkl-dir generated_envs --episodes 200 --train-epochs 5
+  --pkl-dir generated_envs --episodes 200
 
 # Eval on ANY mix of pre-generated PKLs
 python main.py --mode eval --policy bc --env-source pkl \
   --pkl-dir generated_envs --episodes 20
 ```
 
-The agent curriculum approach creates robust policies that generalize across agent counts without needing curriculum sampling during training—all agent-counts are mixed in each epoch.
+The agent curriculum approach creates robust policies that generalize across agent counts without needing curriculum sampling during training.
 
 ## Curriculum Selection: Repeat vs. Sequence Mode
 
@@ -324,7 +324,7 @@ python main.py --mode train --policy bc \
 # 4) MAPPO warmstart from BC checkpoint
 python main.py --mode train --policy mappo \
   --env-source pkl --pkl-dir generated_envs \
-  --episodes 200 --train-epochs 5 \
+  --episodes 200 \
   --obs-variant spawn_aware \
   --init-checkpoint checkpoints/bc.pt \
   --mappo-checkpoint checkpoints/mappo.pt
@@ -370,7 +370,7 @@ python main.py --mode train --policy bc \
 # 4) MAPPO warmstart + PPO train loop
 python main.py --mode train --policy mappo \
   --env-source pkl --pkl-dir generated_envs \
-  --episodes 200 --train-epochs 5 --max-episode-steps 300 \
+  --episodes 200 --max-episode-steps 300 \
   --obs-variant spawn_aware \
   --init-checkpoint checkpoints/bc.pt \
   --mappo-checkpoint checkpoints/mappo.pt \
@@ -418,9 +418,9 @@ A shell script is provided to clean up all previous runs and generated data, the
 1. Removes `runs/`, `generated_envs/`, and `checkpoints/` directories to start fresh
 2. Runs random policy eval (baseline sanity check)
 3. Runs DLA policy eval (heuristic baseline)
-4. Trains BC for 200 episodes × 5 epochs on `decision_point` observations
+4. Trains BC offline on recorded demos (`decision_point`) for multiple optimizer epochs
 5. Evaluates BC on 20 episodes
-6. Trains MAPPO for 200 episodes × 5 epochs on `spawn_aware` observations
+6. Trains MAPPO for 200 episodes on `spawn_aware` observations (with PPO `k_epoch` updates)
 7. Evaluates MAPPO on 20 episodes
 
 All output (progress bars, metrics, TensorBoard logs) is displayed live in the console. This typically takes **2–4 hours** depending on your hardware.
@@ -443,10 +443,10 @@ python main.py --prepare-pkls --prepare-only --pkl-dir generated_envs --pkl-coun
 python main.py --mode record --env-source pkl --pkl-dir generated_envs --episodes 200 --max-episode-steps 300
 
 # 3) Train BC offline from recorded dataset
-python main.py --mode train --policy bc --dataset-path datasets/dla_dataset.pt --env-source pkl --pkl-dir generated_envs --episodes 200 --train-epochs 5 --obs-variant decision_point
+python main.py --mode train --policy bc --dataset-path datasets/dla_dataset.pt --env-source pkl --pkl-dir generated_envs --episodes 200 --obs-variant decision_point
 
 # 4) Train MAPPO with optional BC warmstart
-python main.py --mode train --policy mappo --init-checkpoint checkpoints/bc.pt --env-source pkl --pkl-dir generated_envs --episodes 200 --train-epochs 5 --obs-variant spawn_aware
+python main.py --mode train --policy mappo --init-checkpoint checkpoints/bc.pt --env-source pkl --pkl-dir generated_envs --episodes 200 --obs-variant spawn_aware
 
 # 5) Evaluate MAPPO
 python main.py --mode eval --policy mappo --env-source pkl --pkl-dir generated_envs --episodes 20 --obs-variant spawn_aware
@@ -464,7 +464,7 @@ What this script does:
 5. Saves MAPPO checkpoint and runs eval (and BC eval when BC is enabled).
 6. Logs everything to console + TensorBoard (`runs/`).
 
-You can shorten run lengths by reducing `--episodes`, `--train-epochs`, and `--max-episode-steps` in the commands above.
+You can shorten run lengths by reducing `--episodes` and `--max-episode-steps` in the commands above.
 
 ## Troubleshooting
 
@@ -563,6 +563,7 @@ Standard metrics logged to TensorBoard:
 | `--mappo-kl-stop-factor` | `float` | `1.5` | Early-stop threshold multiplier |
 | `--mappo-mid-eval-every` | `int` | `0` | Run mid-training eval every N collected episodes |
 | `--mappo-mid-eval-episodes` | `int` | `10` | Episodes per mid/final eval run |
+| `--train-epochs` | `int` | `3` | Offline-BC optimization epochs only (`--dataset-path` mode) |
 
 ### Environment & Observation
 
@@ -589,7 +590,7 @@ Example with all curriculum + MAPPO settings:
 python main.py --mode train --policy mappo \
   --env-source pkl --pkl-dir generated_envs \
   --curriculum-spec 1x10,3x20,5x30 \
-  --episodes 60 --train-epochs 3 \
+  --episodes 60 \
   --mappo-rollout-episodes 10 \
   --mappo-ppo-epochs 4 \
   --mappo-batch-size 256 \

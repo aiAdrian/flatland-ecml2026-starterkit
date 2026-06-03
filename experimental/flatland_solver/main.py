@@ -514,7 +514,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--prepare-pkls", action="store_true")
     parser.add_argument("--prepare-only", action="store_true")
     parser.add_argument("--debug-checks", action="store_true")
-    parser.add_argument("--train-epochs", type=int, default=3)
+    parser.add_argument(
+        "--train-epochs",
+        type=int,
+        default=3,
+        help="Optimization epochs for offline BC dataset training (outer train loop is fixed to 1 for BC-online and MAPPO)",
+    )
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--gamma", type=float, default=0.99)
     parser.add_argument("--mappo-rollout-episodes", type=int, default=10,

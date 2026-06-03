@@ -59,12 +59,6 @@ def record_dla_dataset(args, dataset_path: Path) -> Path:
         )
     )
 
-    # Legacy-like recorder context lines for consistency with train_marl.py UX.
-    print(">> DLARecordingWrapper")
-    print(">> DeadLockAvoidancePolicy")
-    print(">> DeadLockAvoidancePolicy")
-    print("[reward] Using OutcomeBasedReward (step=-1, deadlock=-5, done=+50+saved, all_done=+100, fail=-200, scale=0.01)")
-
     # Probe obs_dim from first env (Flatland reset may return dict or list-like)
     probe_obs, _ = env.reset(random_seed=args.seed)
     if isinstance(probe_obs, dict):

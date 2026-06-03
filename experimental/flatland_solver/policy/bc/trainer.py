@@ -168,7 +168,7 @@ def train_bc(args, checkpoint_path: Path, tb_logger=None) -> Path:
         format_console_row(
             "config",
             "bc-online",
-            epochs=args.train_epochs,
+            epochs=1,
             episodes=args.episodes,
             lr=args.lr,
             obs=args.obs_variant,
@@ -177,27 +177,29 @@ def train_bc(args, checkpoint_path: Path, tb_logger=None) -> Path:
             max_steps=args.max_episode_steps,
             base_dim=base_dim,
             resumed=resumed,
+            requested_outer_epochs=int(getattr(args, "train_epochs", 1)),
         )
     )
 
-    for epoch in range(args.train_epochs):
+    online_passes = 1
+    for epoch in range(online_passes):
         losses = []
         correct = 0
         total = 0
         rows_without_valid_before_fix = 0
         labels_forced_valid = 0
         rolling_done = RollingDoneRatio(window_size=20)
-        bar = make_progress_bar(total=args.episodes, desc=f"BC[{epoch + 1}/{args.train_epochs}]")
+        bar = make_progress_bar(total=args.episodes, desc="BC")
 
         for ep in range(args.episodes):
             if args.env_source == "pkl":
-                pkl_path = pkl_files[(epoch * max(1, args.episodes) + ep) % len(pkl_files)]
+                pkl_path = pkl_files[ep % len(pkl_files)]
                 env = build_env_from_pkl(pkl_path, obs_builder=obs_builder)
 
-            expert = DLAPolicy(seed=args.seed + epoch * 1000 + ep)
+            expert = DLAPolicy(seed=args.seed + ep)
             expert.reset_env(env)
 
-            observations, info = env.reset(random_seed=args.seed + ep + epoch * 1000)
+            observations, info = env.reset(random_seed=args.seed + ep)
             del info
             done = {"__all__": False}
             steps = 0
@@ -267,7 +269,7 @@ def train_bc(args, checkpoint_path: Path, tb_logger=None) -> Path:
                 format_console_row(
                     "train",
                     "bc",
-                    epoch=f"{epoch + 1}/{args.train_epochs}",
+                    epoch="1/1",
                     ep=f"{ep + 1}/{args.episodes}",
                     steps=steps,
                     done=f"{ep_done}/{env.get_num_agents()}",
@@ -282,9 +284,9 @@ def train_bc(args, checkpoint_path: Path, tb_logger=None) -> Path:
         dbg = ""
         if getattr(args, "debug_checks", False):
             dbg = f" mask_rows_fixed={rows_without_valid_before_fix} labels_forced_valid={labels_forced_valid}"
-        print(format_console_row("epoch", "bc", epoch=f"{epoch + 1}/{args.train_epochs}", avg_loss=avg_loss, acc=acc, debug=dbg.strip() if dbg else "-"))
+        print(format_console_row("epoch", "bc", epoch="1/1", avg_loss=avg_loss, acc=acc, debug=dbg.strip() if dbg else "-"))
         if tb_logger is not None:
-            tb_logger.log_bc_epoch(epoch + 1, avg_loss=avg_loss, accuracy=acc)
+            tb_logger.log_bc_epoch(1, avg_loss=avg_loss, accuracy=acc)
 
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(

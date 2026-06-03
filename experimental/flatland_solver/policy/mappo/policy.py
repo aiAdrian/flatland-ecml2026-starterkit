@@ -44,12 +44,14 @@ class MAPPOPolicy(RailEnvPolicy[Any, Any, RailEnvActions]):
 
         self.loaded = False
         self.mode = "compact"  # or "structured"
+        self.checkpoint_kind = ""
 
         if checkpoint_path:
             path = Path(checkpoint_path)
             if path.exists():
                 payload = torch.load(path, map_location="cpu")
                 if "model_state" in payload:
+                    self.checkpoint_kind = str(payload.get("kind", ""))
                     self.obs_dim = int(payload.get("obs_dim", self.obs_dim))
                     if self.obs_dim != self.model.obs_dim:
                         self.model = ActorCriticNet(obs_dim=self.obs_dim, action_dim=self.action_size)
@@ -58,6 +60,7 @@ class MAPPOPolicy(RailEnvPolicy[Any, Any, RailEnvActions]):
                     self.mode = "compact"
                     self.loaded = True
                 elif all(k in payload for k in ["base_encoder", "tree_encoder", "fuse", "head"]):
+                    self.checkpoint_kind = str(payload.get("kind", ""))
                     self.hidden = int(payload.get("hidden", self.hidden))
                     self.base_dim = int(payload.get("base_dim", payload.get("obs_dim", self.base_dim)))
                     self.base_encoder = BaseFeatureEncoder(base_dim=self.base_dim, hidden=self.hidden)
@@ -149,9 +152,12 @@ class MAPPOPolicy(RailEnvPolicy[Any, Any, RailEnvActions]):
             emb = self.fuse(torch.cat([emb_base, emb_tree], dim=-1))
             logits = self.head.actor_logits(emb).squeeze(0)
 
-            mask_np = self._legal_action_mask_from_base_obs(base_obs)
-            mask_t = torch.from_numpy(mask_np).float()
-            logits = logits.masked_fill(mask_t < 0.5, float("-inf"))
+            # BC checkpoints are trained without this heuristic legality mask.
+            # Keep inference consistent with the BC training objective.
+            if self.checkpoint_kind != "bc":
+                mask_np = self._legal_action_mask_from_base_obs(base_obs)
+                mask_t = torch.from_numpy(mask_np).float()
+                logits = logits.masked_fill(mask_t < 0.5, float("-inf"))
             return logits
 
     def act_many(self, handles: List[int], observations: List[Any], **kwargs) -> Dict[int, RailEnvActions]:
