@@ -220,6 +220,11 @@ def format_episode_compact(
     if "entropy" in metrics:
         v = float(metrics["entropy"])
         parts.append(f"H={v:.4f}")
+
+    # epsilon exploration (optional)
+    if "eps" in metrics:
+        v = float(metrics["eps"])
+        parts.append(f"eps={v:.3f}")
     
     # PPO stats (compact)
     ppo_parts = []

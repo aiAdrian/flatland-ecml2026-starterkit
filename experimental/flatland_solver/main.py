@@ -530,6 +530,12 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Mini-batch size for MAPPO PPO updates")
     parser.add_argument("--mappo-entropy-coef", type=float, default=0.02,
                         help="Entropy regularization coefficient for MAPPO PPO loss")
+    parser.add_argument("--mappo-eps-start", type=float, default=0.0,
+                        help="Epsilon exploration start value for MAPPO rollout action selection")
+    parser.add_argument("--mappo-eps-end", type=float, default=0.0,
+                        help="Epsilon exploration final value for MAPPO rollout action selection")
+    parser.add_argument("--mappo-eps-decay-episodes", type=int, default=100,
+                        help="Episodes over which epsilon decays linearly from start to end (0 uses end directly)")
     parser.add_argument("--mappo-value-coef", type=float, default=0.5,
                         help="Value loss coefficient for MAPPO PPO loss")
     parser.add_argument("--mappo-clip-eps", type=float, default=0.2,

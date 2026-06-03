@@ -142,6 +142,8 @@ def _collect_episode(
     seed: int,
     max_steps: int,
     reward_shaper=None,
+    action_epsilon: float = 0.0,
+    rng: np.random.RandomState | None = None,
 ) -> dict[str, Any] | None:
     observations, info = env.reset(random_seed=seed)
     del info
@@ -177,8 +179,18 @@ def _collect_episode(
                 logits, value = _forward_structured(base_encoder, tree_encoder, fuse, head, base_t, [payload], pool_t)
                 logits = logits.masked_fill(mask_t < 0.5, float("-inf"))
                 dist = Categorical(logits=logits)
-                action_t = dist.sample()
-                action = int(action_t.item())
+
+                use_eps = float(action_epsilon) > 0.0 and rng is not None and float(rng.rand()) < float(action_epsilon)
+                if use_eps:
+                    legal = np.flatnonzero(mask_np > 0.5)
+                    if legal.size <= 0:
+                        legal = np.arange(5, dtype=np.int64)
+                    action = int(rng.choice(legal))
+                    action_t = torch.tensor(action, dtype=torch.long, device=logits.device)
+                else:
+                    action_t = dist.sample()
+                    action = int(action_t.item())
+
                 old_lp = float(dist.log_prob(action_t).item())
                 val = float(value.item())
 
@@ -669,6 +681,20 @@ def train_mappo(args, checkpoint_path: Path, tb_logger=None) -> Path:
     global_pkl_cursor = 0
     global_update_idx = 0
     eval_log: list[dict[str, Any]] = []
+    eps_rng = np.random.RandomState(int(args.seed) + 1337)
+
+    eps_start = float(getattr(args, "mappo_eps_start", 0.0))
+    eps_end = float(getattr(args, "mappo_eps_end", eps_start))
+    eps_decay_episodes = int(getattr(args, "mappo_eps_decay_episodes", 0))
+
+    def _epsilon_at_episode(ep_idx_zero_based: int) -> float:
+        if eps_start <= 0.0 and eps_end <= 0.0:
+            return 0.0
+        if eps_decay_episodes <= 0:
+            return max(0.0, eps_end)
+        t = min(max(ep_idx_zero_based, 0), eps_decay_episodes)
+        alpha = float(t) / float(max(1, eps_decay_episodes))
+        return max(0.0, (1.0 - alpha) * eps_start + alpha * eps_end)
 
     outer_passes = 1
     for epoch in range(outer_passes):
@@ -758,6 +784,8 @@ def train_mappo(args, checkpoint_path: Path, tb_logger=None) -> Path:
                     seed=args.seed + ep,
                     max_steps=args.max_episode_steps,
                     reward_shaper=reward_shaper,
+                    action_epsilon=_epsilon_at_episode(ep),
+                    rng=eps_rng,
                 )
                 if episode is None:
                     continue
@@ -782,27 +810,30 @@ def train_mappo(args, checkpoint_path: Path, tb_logger=None) -> Path:
 
                 rolling_done.update(ep_done, n_agents_ep)
                 bar.set_secondary(rolling_done.window_ratio(), rolling_done.format_postfix())
-                bar.set_postfix_str(
-                    f"s={int(episode['steps'])} rew={ep_reward:+.2f} KL={last_update_stats['approx_kl']:+.4f} ent={last_update_stats['entropy']:.4f}"
+                cur_eps = _epsilon_at_episode(ep)
+                postfix = (
+                    f"s={int(episode['steps'])} rew={ep_reward:+.2f} "
+                    f"KL={last_update_stats['approx_kl']:+.4f} ent={last_update_stats['entropy']:.4f}"
                 )
+                if cur_eps > 0.0:
+                    postfix += f" eps={cur_eps:.3f}"
+                bar.set_postfix_str(postfix)
                 bar.update(1)
 
                 ep += 1
                 act_hist = {i: int(episode["action_hist"][i].item()) for i in range(5)}
-                print(
-                    format_episode_compact(
-                        "TRAIN",
-                        episode=ep,
-                        total=args.episodes,
-                        done=ep_done,
-                        n_agents=n_agents_ep,
-                        rew=ep_reward,
-                        steps=int(episode["steps"]),
-                        approx_kl=last_update_stats["approx_kl"],
-                        entropy=last_update_stats["entropy"],
-                        acts=act_hist,
-                    )
+                metrics = dict(
+                    done=ep_done,
+                    n_agents=n_agents_ep,
+                    rew=ep_reward,
+                    steps=int(episode["steps"]),
+                    approx_kl=last_update_stats["approx_kl"],
+                    entropy=last_update_stats["entropy"],
+                    acts=act_hist,
                 )
+                if cur_eps > 0.0:
+                    metrics["eps"] = cur_eps
+                print(format_episode_compact("TRAIN", episode=ep, total=args.episodes, **metrics))
 
                 if tb_logger is not None:
                     ep_idx = ep
