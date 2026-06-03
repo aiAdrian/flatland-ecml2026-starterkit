@@ -236,6 +236,10 @@ def maybe_prepare_pkl_dataset(args) -> None:
 def run_eval(args) -> EvalStats:
     policy, obs_builder = make_policy_and_observation(args)
     cfg = make_solver_config(args)
+    
+    print("Policy:", policy.__class__.__name__)
+    print("Observation Builder:", obs_builder.__class__.__name__)
+    
     pkl_files = list_pkl_dataset(args.pkl_dir) if args.env_source == "pkl" else []
     if args.env_source == "pkl" and not pkl_files:
         raise ValueError(f"No PKL environments found in {args.pkl_dir}. Run with --prepare-pkls first.")
@@ -252,7 +256,9 @@ def run_eval(args) -> EvalStats:
     if reward_shaper is not None:
         print(reward_shaper.description())
 
-    renderer = RenderTool(env, gl="PGL", show_debug=True) if args.rendering and env is not None else None
+    renderer = RenderTool(env, 
+                          gl="PGL", 
+                          show_debug=True) if args.rendering and env is not None else None
 
     total_done_agents = 0
     total_agents = 0
@@ -286,6 +292,7 @@ def run_eval(args) -> EvalStats:
             handles = list(range(env.get_num_agents()))
             obs_batch = [observations[h] for h in handles]
             actions = policy.act_many(handles, obs_batch)
+            
             observations, rewards, done, info = env.step(normalize_actions(actions))
             if reward_shaper is not None:
                 rewards = reward_shaper(rewards, done, info, env, actions)
@@ -302,7 +309,8 @@ def run_eval(args) -> EvalStats:
                     show_predictions=False,
                     frames=False,
                 )
-
+                 
+                    
         episode_done = sum(a.state == TrainState.DONE for a in env.agents)
         active_or_blocked = sum(
             a.state in (TrainState.MOVING, TrainState.STOPPED, TrainState.MALFUNCTION)
@@ -436,6 +444,9 @@ def run_bc_mode(args) -> None:
 
 
 def run_train(args) -> None:
+
+    policy, obs_builder = make_policy_and_observation(args)
+
     if args.policy == "bc":
         args.obs_builder = build_observation_builder(
             obs_variant=args.obs_variant,

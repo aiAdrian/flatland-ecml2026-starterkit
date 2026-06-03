@@ -37,11 +37,19 @@ class FallbackProgressBar:
 
 
 class DualProgressBar:
-    def __init__(self, total: int, desc: str = "", width: int = 15, secondary_width: int = 10):
+    def __init__(self, 
+                 total: int, 
+                 desc: str = "",
+                   width: int = 15, 
+                   secondary_width: int = 10,
+                   disable_bar_1: bool = True,
+                   disable_bar_2: bool = False):
         self.total = max(1, int(total))
         self.desc = desc
         self.width = max(4, int(width))
         self.secondary_width = max(4, int(secondary_width))
+        self.disable_bar_1 = disable_bar_1
+        self.disable_bar_2 = disable_bar_2
         self.n = 0
         self._t0 = time.perf_counter()
         self._last_print = 0.0
@@ -83,11 +91,17 @@ class DualProgressBar:
         postfix = f" {self._postfix}" if self._postfix else ""
         secondary_text = f" {self._secondary_text}" if self._secondary_text else ""
         eta_text = f"eta={eta:.0f}s" if eta is not None else "eta=--"
-        line = (
-            f"{self.desc}: [{primary}] {self.n}/{self.total} {progress_pct:3d}% "
-            f"[{secondary}] done={secondary_pct:3d}%"
-            f"{secondary_text}{postfix}  [{rate:.2f} it/s {eta_text}]"
-        )
+        
+        parts = []
+        parts.append(f"{self.desc}\t {self.n}/{self.total}\t")
+        if not self.disable_bar_1:
+            parts.append(f"[{primary}] {progress_pct:3d}%")
+
+        if not self.disable_bar_2:
+            parts.append(f"[{secondary}] done={secondary_pct:3d}%{secondary_text}")
+
+        parts.append(f"[{rate:.2f} it/s {eta_text}]")
+        line = " ".join(parts) + postfix
         print(line)
         self._last_print = now
 
