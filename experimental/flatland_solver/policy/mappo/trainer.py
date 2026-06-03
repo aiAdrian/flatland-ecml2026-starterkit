@@ -363,6 +363,9 @@ def _ppo_update(
         head_snapshot = [p.detach().clone() for p in head.parameters()]
 
     for _ in range(max(1, int(ppo_epochs))):
+        # ---------------------------------------------------
+        print("PPO Update Epoch: " , epoch+1, "/", total_epochs)
+        # ---------------------------------------------------
         idx = np.random.permutation(n)
         epoch_early_stop = False
 
@@ -696,312 +699,317 @@ def train_mappo(args, checkpoint_path: Path, tb_logger=None) -> Path:
         alpha = float(t) / float(max(1, eps_decay_episodes))
         return max(0.0, (1.0 - alpha) * eps_start + alpha * eps_end)
 
-    outer_passes = 1
-    for epoch in range(outer_passes):
-        epoch_policy_loss = 0.0
-        epoch_value_loss = 0.0
-        epoch_entropy = 0.0
-        epoch_approx_kl = 0.0
-        epoch_ratio = 0.0
-        epoch_clip_frac = 0.0
-        n_updates = 0
+    # Start learning - only one epoch with 
+    epoch_policy_loss = 0.0
+    epoch_value_loss = 0.0
+    epoch_entropy = 0.0
+    epoch_approx_kl = 0.0
+    epoch_ratio = 0.0
+    epoch_clip_frac = 0.0
+    n_updates = 0
 
-        rolling_done = RollingDoneRatio(window_size=max(1, int(getattr(args, "mappo_done_window", 20))))
-        bar = make_progress_bar(total=args.episodes, desc="MAPPO")
+    rolling_done = RollingDoneRatio(window_size=max(1, int(getattr(args, "mappo_done_window", 20))))
+    bar = make_progress_bar(total=args.episodes, desc="MAPPO")
 
-        ep = 0
-        last_update_stats = {
-            "p_loss": 0.0,
-            "v_loss": 0.0,
-            "entropy": 0.0,
-            "approx_kl": 0.0,
-            "ratio": 0.0,
-            "clip_frac": 0.0,
-        }
+    ep = 0
+    last_update_stats = {
+        "p_loss": 0.0,
+        "v_loss": 0.0,
+        "entropy": 0.0,
+        "approx_kl": 0.0,
+        "ratio": 0.0,
+        "clip_frac": 0.0,
+    }
 
-        prev_n_agents = None
-        while ep < args.episodes:
-            if curriculum_mode:
-                target_rollout_eps = min(args.episodes - ep, max(1, len(curriculum)))
-            else:
-                target_rollout_eps = min(args.episodes - ep, max(1, int(args.mappo_rollout_episodes)))
+    prev_n_agents = None
+    while ep < args.episodes:
+        if curriculum_mode:
+            target_rollout_eps = min(args.episodes - ep, max(1, len(curriculum)))
+        else:
+            target_rollout_eps = min(args.episodes - ep, max(1, int(args.mappo_rollout_episodes)))
 
-            episodes_block: list[dict[str, Any]] = []
-            block_collected = 0
+        episodes_block: list[dict[str, Any]] = []
+        block_collected = 0
 
-            # Detect curriculum transitions.
-            # `ep` is the global collected-episode counter and determines the
-            # currently active curriculum slot for the progress marker.
-            if curriculum_mode and curriculum:
-                next_n_agents = curriculum[ep % len(curriculum)]
-                if next_n_agents != prev_n_agents:
-                    print(f"[CURRICULUM] n_agents={next_n_agents} @ episode {ep+1}/{args.episodes}")
-                    prev_n_agents = next_n_agents
-
-            for block_i in range(target_rollout_eps):
-                if args.env_source == "pkl":
-                    if curriculum_mode and grouped_pkls:
-                        # Curriculum next/iteration resolution happens here.
-                        # `block_i` advances inside the rollout block and is
-                        # mapped to the curriculum array via modulo.
-                        n_agents_target = curriculum[block_i % len(curriculum)]
-                        bucket = grouped_pkls.get(n_agents_target, [])
-                        if bucket:
-                            idx = grouped_cursor.get(n_agents_target, 0) % len(bucket)
-                            pkl_path = bucket[idx]
-                            grouped_cursor[n_agents_target] = grouped_cursor.get(n_agents_target, 0) + 1
-                        else:
-                            pkl_path = pkl_files[global_pkl_cursor % len(pkl_files)]
-                            global_pkl_cursor += 1
+        # Detect curriculum transitions.
+        # `ep` is the global collected-episode counter and determines the
+        # currently active curriculum slot for the progress marker.
+        if curriculum_mode and curriculum:
+            next_n_agents = curriculum[ep % len(curriculum)]
+            if next_n_agents != prev_n_agents:
+                print(f"[CURRICULUM] n_agents={next_n_agents} @ episode {ep+1}/{args.episodes}")
+                prev_n_agents = next_n_agents
+        
+        # ---------------------------------------------------
+        print("[Start Rollout]: " , target_rollout_eps)
+        # ---------------------------------------------------
+        for block_i in range(target_rollout_eps):
+            if args.env_source == "pkl":
+                if curriculum_mode and grouped_pkls:
+                    # Curriculum next/iteration resolution happens here.
+                    # `block_i` advances inside the rollout block and is
+                    # mapped to the curriculum array via modulo.
+                    n_agents_target = curriculum[block_i % len(curriculum)]
+                    bucket = grouped_pkls.get(n_agents_target, [])
+                    if bucket:
+                        idx = grouped_cursor.get(n_agents_target, 0) % len(bucket)
+                        pkl_path = bucket[idx]
+                        grouped_cursor[n_agents_target] = grouped_cursor.get(n_agents_target, 0) + 1
                     else:
                         pkl_path = pkl_files[global_pkl_cursor % len(pkl_files)]
                         global_pkl_cursor += 1
-                    env = build_env_from_pkl(pkl_path, obs_builder=obs_builder)
                 else:
-                    if curriculum_mode:
-                        # Same curriculum index logic for on-the-fly generation.
-                        n_agents_target = curriculum[block_i % len(curriculum)]
-                        sub_cfg = SolverConfig(
-                            width=args.width,
-                            height=args.height,
-                            n_agents=n_agents_target,
-                            n_cities=args.n_cities,
-                            max_rails_between_cities=args.max_rails_between_cities,
-                            max_rail_pairs_in_city=args.max_rail_pairs_in_city,
-                            seed=args.seed,
-                        )
-                        env = build_env(cfg=sub_cfg, obs_builder=obs_builder)
-                    else:
-                        env = build_env(cfg=cfg, obs_builder=obs_builder)
-
-                episode = _collect_episode(
-                    env=env,
-                    base_encoder=base_encoder,
-                    tree_encoder=tree_encoder,
-                    fuse=fuse,
-                    head=head,
-                    base_dim=base_dim,
-                    seed=args.seed + ep,
-                    max_steps=args.max_episode_steps,
-                    reward_shaper=reward_shaper,
-                    action_epsilon=_epsilon_at_episode(ep),
-                    rng=eps_rng,
-                )
-                if episode is None:
-                    continue
-
-                episodes_block.append(episode)
-                block_collected += 1
-
-                total_feature_sum += float(episode["feat_sum"])
-                total_feature_sq_sum += float(episode["feat_sq_sum"])
-                total_feature_count += int(episode["feat_count"])
-                total_mask_active += float(episode["mask_active"])
-                total_mask_count += float(episode["mask_count"])
-                total_action_hist += episode["action_hist"]
-
-                ep_done = int(episode["ep_done"])
-                n_agents_ep = int(episode["n_agents"])
-                ep_reward = float(episode["ep_reward"])
-                done_rate = ep_done / max(1, n_agents_ep)
-                done_history.append(done_rate)
-                done_window = max(1, int(getattr(args, "mappo_done_window", 20)))
-                recent_done_rolling_ration = sum(done_history[-done_window:]) / max(1, len(done_history[-done_window:]))
-
-                rolling_done.update(ep_done, n_agents_ep)
-                bar.set_secondary(rolling_done.window_ratio(), rolling_done.format_postfix())
-                cur_eps = _epsilon_at_episode(ep)
-                postfix = (
-                    f"s={int(episode['steps'])} rew={ep_reward:+.2f} "
-                    f"KL={last_update_stats['approx_kl']:+.4f} ent={last_update_stats['entropy']:.4f}"
-                )
-                if cur_eps > 0.0:
-                    postfix += f" eps={cur_eps:.3f}"
-                bar.set_postfix_str(postfix)
-                bar.update(1)
-
-                ep += 1
-                act_hist = {i: int(episode["action_hist"][i].item()) for i in range(5)}
-                metrics = dict(
-                    done=ep_done,
-                    n_agents=n_agents_ep,
-                    rew=ep_reward,
-                    steps=int(episode["steps"]),
-                    approx_kl=last_update_stats["approx_kl"],
-                    entropy=last_update_stats["entropy"],
-                    acts=act_hist,
-                )
-                if cur_eps > 0.0:
-                    metrics["eps"] = cur_eps
-                print(format_episode_compact("TRAIN", episode=ep, total=args.episodes, **metrics))
-
-                if tb_logger is not None:
-                    ep_idx = ep
-                    tb_logger.log_mappo_episode(
-                        episode_idx=ep_idx,
-                        done_rate=done_rate,
-                        episode_len=float(episode["steps"]),
-                        total_reward=ep_reward,
-                        n_agents=n_agents_ep,
-                        deadlock_rate=float(episode["deadlock_rate"]),
-                        done_rolling=recent_done_rolling_ration,
-                        policy_loss=last_update_stats["p_loss"],
-                        value_loss=last_update_stats["v_loss"],
+                    pkl_path = pkl_files[global_pkl_cursor % len(pkl_files)]
+                    global_pkl_cursor += 1
+                env = build_env_from_pkl(pkl_path, obs_builder=obs_builder)
+            else:
+                if curriculum_mode:
+                    # Same curriculum index logic for on-the-fly generation.
+                    n_agents_target = curriculum[block_i % len(curriculum)]
+                    sub_cfg = SolverConfig(
+                        width=args.width,
+                        height=args.height,
+                        n_agents=n_agents_target,
+                        n_cities=args.n_cities,
+                        max_rails_between_cities=args.max_rails_between_cities,
+                        max_rail_pairs_in_city=args.max_rail_pairs_in_city,
+                        seed=args.seed,
                     )
-                    tb_logger.log_scalar("env/n_agents", n_agents_ep, ep_idx)
-                    tb_logger.log_scalar("env/done_count", ep_done, ep_idx)
-                    ad = episode["action_hist"].to(torch.float32)
-                    denom = max(1.0, float(ad.sum().item()))
-                    tb_logger.log_scalar("actions/do_nothing", float(ad[0].item() / denom), ep_idx)
-                    tb_logger.log_scalar("actions/move_left", float(ad[1].item() / denom), ep_idx)
-                    tb_logger.log_scalar("actions/move_forward", float(ad[2].item() / denom), ep_idx)
-                    tb_logger.log_scalar("actions/move_right", float(ad[3].item() / denom), ep_idx)
-                    tb_logger.log_scalar("actions/stop", float(ad[4].item() / denom), ep_idx)
+                    env = build_env(cfg=sub_cfg, obs_builder=obs_builder)
+                else:
+                    env = build_env(cfg=cfg, obs_builder=obs_builder)
 
-                mid_eval_every = int(getattr(args, "mappo_mid_eval_every", 0))
-                if mid_eval_every > 0 and ep % mid_eval_every == 0:
-                    print(f"\n[Train] Mid-training eval at episode {ep} ...")
-                    mid_metrics = _eval_model(
-                        base_encoder=base_encoder,
-                        tree_encoder=tree_encoder,
-                        fuse=fuse,
-                        head=head,
-                        obs_builder=obs_builder,
-                        cfg=cfg,
-                        env_source=args.env_source,
-                        pkl_files=pkl_files,
-                        base_dim=base_dim,
-                        n_episodes=int(getattr(args, "mappo_mid_eval_episodes", 10)),
-                        max_steps=args.max_episode_steps,
-                        seed_base=args.seed + ep,
-                        greedy=bool(getattr(args, "mappo_eval_greedy", False)),
-                        reward_shaper=reward_shaper,
-                    )
-                    eval_entry = {"kind": "mid", "episode": ep, **mid_metrics}
-                    eval_log.append(eval_entry)
-                    if tb_logger is not None:
-                        tb_logger.log_scalar("train_eval/done_rate", float(mid_metrics["done_rate"]), ep)
-                        tb_logger.log_scalar("train_eval/deadlock_rate", float(mid_metrics["deadlock_rate"]), ep)
-                        tb_logger.log_scalar("train_eval/episode_len", float(mid_metrics["episode_len"]), ep)
-                        tb_logger.log_scalar("train_eval/total_reward", float(mid_metrics["total_reward"]), ep)
-                    _save_checkpoint(
-                        checkpoint_path=checkpoint_path,
-                        base_encoder=base_encoder,
-                        tree_encoder=tree_encoder,
-                        fuse=fuse,
-                        head=head,
-                        optimizer=optimizer,
-                        base_dim=base_dim,
-                    )
-
-            batch = _build_ppo_batch(
-                episodes=episodes_block,
-                gamma=float(args.gamma),
-                gae_lambda=0.95,
-                base_dim=base_dim,
-                device=device,
-            )
-            update_stats = _ppo_update(
+            episode = _collect_episode(
+                env=env,
                 base_encoder=base_encoder,
                 tree_encoder=tree_encoder,
                 fuse=fuse,
                 head=head,
-                optimizer=optimizer,
-                batch=batch,
-                ppo_epochs=int(args.mappo_ppo_epochs),
-                batch_size=int(args.mappo_batch_size),
-                entropy_coef=float(args.mappo_entropy_coef),
-                value_coef=float(args.mappo_value_coef),
-                clip_eps=float(args.mappo_clip_eps),
-                max_grad_norm=5.0,
-                target_kl=float(args.mappo_target_kl),
-                kl_stop_factor=float(args.mappo_kl_stop_factor),
-                epoch=1,
-                total_epochs=1,
+                base_dim=base_dim,
+                seed=args.seed + ep,
+                max_steps=args.max_episode_steps,
+                reward_shaper=reward_shaper,
+                action_epsilon=_epsilon_at_episode(ep),
+                rng=eps_rng,
             )
-            if update_stats is None:
+            if episode is None:
                 continue
 
-            global_update_idx += 1
-            n_updates += 1
-            epoch_policy_loss += float(update_stats["p_loss"])
-            epoch_value_loss += float(update_stats["v_loss"])
-            epoch_entropy += float(update_stats["entropy"])
-            epoch_approx_kl += float(update_stats["approx_kl"])
-            epoch_ratio += float(update_stats["ratio"])
-            epoch_clip_frac += float(update_stats["clip_frac"])
-            last_update_stats = {
-                "p_loss": float(update_stats["p_loss"]),
-                "v_loss": float(update_stats["v_loss"]),
-                "entropy": float(update_stats["entropy"]),
-                "approx_kl": float(update_stats["approx_kl"]),
-                "ratio": float(update_stats["ratio"]),
-                "clip_frac": float(update_stats["clip_frac"]),
-            }
+            episodes_block.append(episode)
+            block_collected += 1
 
-            print(
-                format_console_row(
-                    "update",
-                    "mappo",
-                    epoch="1/1",
-                    upd=global_update_idx,
-                    n_rollout=block_collected,
-                    n_samples=int(update_stats["n_samples"]),
-                    k_epoch=args.mappo_ppo_epochs,
-                    mb=int(update_stats["n_minibatches"]),
-                    p_loss=float(update_stats["p_loss"]),
-                    v_loss=float(update_stats["v_loss"]),
-                    entropy=float(update_stats["entropy"]),
-                    approx_kl=float(update_stats["approx_kl"]),
-                    ratio=float(update_stats["ratio"]),
-                    clip_frac=float(update_stats["clip_frac"]),
-                    skip=float(update_stats.get("early_stop_skips", 0.0)),
-                )
+            total_feature_sum += float(episode["feat_sum"])
+            total_feature_sq_sum += float(episode["feat_sq_sum"])
+            total_feature_count += int(episode["feat_count"])
+            total_mask_active += float(episode["mask_active"])
+            total_mask_count += float(episode["mask_count"])
+            total_action_hist += episode["action_hist"]
+
+            ep_done = int(episode["ep_done"])
+            n_agents_ep = int(episode["n_agents"])
+            ep_reward = float(episode["ep_reward"])
+            done_rate = ep_done / max(1, n_agents_ep)
+            done_history.append(done_rate)
+            done_window = max(1, int(getattr(args, "mappo_done_window", 20)))
+            recent_done_rolling_ration = sum(done_history[-done_window:]) / max(1, len(done_history[-done_window:]))
+
+            rolling_done.update(ep_done, n_agents_ep)
+            bar.set_secondary(rolling_done.window_ratio(), rolling_done.format_postfix())
+            cur_eps = _epsilon_at_episode(ep)
+            postfix = (
+                f"s={int(episode['steps'])} rew={ep_reward:+.2f} "
+                f"KL={last_update_stats['approx_kl']:+.4f} ent={last_update_stats['entropy']:.4f}"
             )
+            if cur_eps > 0.0:
+                postfix += f" eps={cur_eps:.3f}"
+            bar.set_postfix_str(postfix)
+            bar.update(1)
+
+            ep += 1
+            act_hist = {i: int(episode["action_hist"][i].item()) for i in range(5)}
+            metrics = dict(
+                done=ep_done,
+                n_agents=n_agents_ep,
+                rew=ep_reward,
+                steps=int(episode["steps"]),
+                approx_kl=last_update_stats["approx_kl"],
+                entropy=last_update_stats["entropy"],
+                acts=act_hist,
+            )
+            if cur_eps > 0.0:
+                metrics["eps"] = cur_eps
+            print(format_episode_compact("TRAIN", episode=ep, total=args.episodes, **metrics))
 
             if tb_logger is not None:
-                tb_logger.log_scalar("ppo_update/p_loss", float(update_stats["p_loss"]), global_update_idx)
-                tb_logger.log_scalar("ppo_update/v_loss", float(update_stats["v_loss"]), global_update_idx)
-                tb_logger.log_scalar("ppo_update/entropy", float(update_stats["entropy"]), global_update_idx)
-                tb_logger.log_scalar("ppo_update/approx_kl", float(update_stats["approx_kl"]), global_update_idx)
-                tb_logger.log_scalar("ppo_update/ratio", float(update_stats["ratio"]), global_update_idx)
-                tb_logger.log_scalar("ppo_update/clip_frac", float(update_stats["clip_frac"]), global_update_idx)
-                tb_logger.log_scalar("ppo_update/early_stop_skips", float(update_stats.get("early_stop_skips", 0.0)), global_update_idx)
-
-        if n_updates == 0:
-            print(format_console_row("epoch", "mappo", epoch="1/1", status="no_batches"))
-        else:
-            avg_p = epoch_policy_loss / n_updates
-            avg_v = epoch_value_loss / n_updates
-            avg_entropy = epoch_entropy / n_updates
-            avg_kl = epoch_approx_kl / n_updates
-            avg_ratio = epoch_ratio / n_updates
-            avg_clip_frac = epoch_clip_frac / n_updates
-            print(
-                format_console_row(
-                    "epoch",
-                    "mappo",
-                    epoch="1/1",
-                    policy_loss=avg_p,
-                    value_loss=avg_v,
-                    entropy=avg_entropy,
-                    approx_kl=avg_kl,
-                    ratio=avg_ratio,
-                    clip_frac=avg_clip_frac,
+                ep_idx = ep
+                tb_logger.log_mappo_episode(
+                    episode_idx=ep_idx,
+                    done_rate=done_rate,
+                    episode_len=float(episode["steps"]),
+                    total_reward=ep_reward,
+                    n_agents=n_agents_ep,
+                    deadlock_rate=float(episode["deadlock_rate"]),
+                    done_rolling=recent_done_rolling_ration,
+                    policy_loss=last_update_stats["p_loss"],
+                    value_loss=last_update_stats["v_loss"],
                 )
+                tb_logger.log_scalar("env/n_agents", n_agents_ep, ep_idx)
+                tb_logger.log_scalar("env/done_count", ep_done, ep_idx)
+                ad = episode["action_hist"].to(torch.float32)
+                denom = max(1.0, float(ad.sum().item()))
+                tb_logger.log_scalar("actions/do_nothing", float(ad[0].item() / denom), ep_idx)
+                tb_logger.log_scalar("actions/move_left", float(ad[1].item() / denom), ep_idx)
+                tb_logger.log_scalar("actions/move_forward", float(ad[2].item() / denom), ep_idx)
+                tb_logger.log_scalar("actions/move_right", float(ad[3].item() / denom), ep_idx)
+                tb_logger.log_scalar("actions/stop", float(ad[4].item() / denom), ep_idx)
+
+            mid_eval_every = int(getattr(args, "mappo_mid_eval_every", 0))
+            if mid_eval_every > 0 and ep % mid_eval_every == 0:
+                print(f"\n[Train] Mid-training eval at episode {ep} ...")
+                mid_metrics = _eval_model(
+                    base_encoder=base_encoder,
+                    tree_encoder=tree_encoder,
+                    fuse=fuse,
+                    head=head,
+                    obs_builder=obs_builder,
+                    cfg=cfg,
+                    env_source=args.env_source,
+                    pkl_files=pkl_files,
+                    base_dim=base_dim,
+                    n_episodes=int(getattr(args, "mappo_mid_eval_episodes", 10)),
+                    max_steps=args.max_episode_steps,
+                    seed_base=args.seed + ep,
+                    greedy=bool(getattr(args, "mappo_eval_greedy", False)),
+                    reward_shaper=reward_shaper,
+                )
+                eval_entry = {"kind": "mid", "episode": ep, **mid_metrics}
+                eval_log.append(eval_entry)
+                if tb_logger is not None:
+                    tb_logger.log_scalar("train_eval/done_rate", float(mid_metrics["done_rate"]), ep)
+                    tb_logger.log_scalar("train_eval/deadlock_rate", float(mid_metrics["deadlock_rate"]), ep)
+                    tb_logger.log_scalar("train_eval/episode_len", float(mid_metrics["episode_len"]), ep)
+                    tb_logger.log_scalar("train_eval/total_reward", float(mid_metrics["total_reward"]), ep)
+                _save_checkpoint(
+                    checkpoint_path=checkpoint_path,
+                    base_encoder=base_encoder,
+                    tree_encoder=tree_encoder,
+                    fuse=fuse,
+                    head=head,
+                    optimizer=optimizer,
+                    base_dim=base_dim,
+                )
+
+        # ---------------------------------------------------
+        print("[Start Policy Update]")
+        # ---------------------------------------------------
+
+        batch = _build_ppo_batch(
+            episodes=episodes_block,
+            gamma=float(args.gamma),
+            gae_lambda=0.95,
+            base_dim=base_dim,
+            device=device,
+        )
+        update_stats = _ppo_update(
+            base_encoder=base_encoder,
+            tree_encoder=tree_encoder,
+            fuse=fuse,
+            head=head,
+            optimizer=optimizer,
+            batch=batch,
+            ppo_epochs=int(args.mappo_ppo_epochs),
+            batch_size=int(args.mappo_batch_size),
+            entropy_coef=float(args.mappo_entropy_coef),
+            value_coef=float(args.mappo_value_coef),
+            clip_eps=float(args.mappo_clip_eps),
+            max_grad_norm=5.0,
+            target_kl=float(args.mappo_target_kl),
+            kl_stop_factor=float(args.mappo_kl_stop_factor),
+            epoch=1,
+            total_epochs=1,
+        )
+        if update_stats is None:
+            continue
+
+        global_update_idx += 1
+        n_updates += 1
+        epoch_policy_loss += float(update_stats["p_loss"])
+        epoch_value_loss += float(update_stats["v_loss"])
+        epoch_entropy += float(update_stats["entropy"])
+        epoch_approx_kl += float(update_stats["approx_kl"])
+        epoch_ratio += float(update_stats["ratio"])
+        epoch_clip_frac += float(update_stats["clip_frac"])
+        last_update_stats = {
+            "p_loss": float(update_stats["p_loss"]),
+            "v_loss": float(update_stats["v_loss"]),
+            "entropy": float(update_stats["entropy"]),
+            "approx_kl": float(update_stats["approx_kl"]),
+            "ratio": float(update_stats["ratio"]),
+            "clip_frac": float(update_stats["clip_frac"]),
+        }
+
+        print(
+            format_console_row(
+                "update",
+                "mappo", 
+                upd=global_update_idx,
+                n_rollout=block_collected,
+                n_samples=int(update_stats["n_samples"]),
+                k_epoch=args.mappo_ppo_epochs,
+                mb=int(update_stats["n_minibatches"]),
+                p_loss=float(update_stats["p_loss"]),
+                v_loss=float(update_stats["v_loss"]),
+                entropy=float(update_stats["entropy"]),
+                approx_kl=float(update_stats["approx_kl"]),
+                ratio=float(update_stats["ratio"]),
+                clip_frac=float(update_stats["clip_frac"]),
+                skip=float(update_stats.get("early_stop_skips", 0.0)),
             )
-            if tb_logger is not None:
-                tb_logger.log_mappo_epoch(
-                    1,
-                    policy_loss=avg_p,
-                    value_loss=avg_v,
-                    entropy=avg_entropy,
-                    approx_kl=avg_kl,
-                    ratio=avg_ratio,
-                    clip_frac=avg_clip_frac,
-                )
+        )
 
-        bar.close()
+        if tb_logger is not None:
+            tb_logger.log_scalar("ppo_update/p_loss", float(update_stats["p_loss"]), global_update_idx)
+            tb_logger.log_scalar("ppo_update/v_loss", float(update_stats["v_loss"]), global_update_idx)
+            tb_logger.log_scalar("ppo_update/entropy", float(update_stats["entropy"]), global_update_idx)
+            tb_logger.log_scalar("ppo_update/approx_kl", float(update_stats["approx_kl"]), global_update_idx)
+            tb_logger.log_scalar("ppo_update/ratio", float(update_stats["ratio"]), global_update_idx)
+            tb_logger.log_scalar("ppo_update/clip_frac", float(update_stats["clip_frac"]), global_update_idx)
+            tb_logger.log_scalar("ppo_update/early_stop_skips", float(update_stats.get("early_stop_skips", 0.0)), global_update_idx)
+
+    if n_updates == 0:
+        print(format_console_row("epoch", "mappo", epoch="1/1", status="no_batches"))
+    else:
+        avg_p = epoch_policy_loss / n_updates
+        avg_v = epoch_value_loss / n_updates
+        avg_entropy = epoch_entropy / n_updates
+        avg_kl = epoch_approx_kl / n_updates
+        avg_ratio = epoch_ratio / n_updates
+        avg_clip_frac = epoch_clip_frac / n_updates
+        print(
+            format_console_row(
+                "epoch",
+                "mappo",
+                epoch="1/1",
+                policy_loss=avg_p,
+                value_loss=avg_v,
+                entropy=avg_entropy,
+                approx_kl=avg_kl,
+                ratio=avg_ratio,
+                clip_frac=avg_clip_frac,
+            )
+        )
+        if tb_logger is not None:
+            tb_logger.log_mappo_epoch(
+                1,
+                policy_loss=avg_p,
+                value_loss=avg_v,
+                entropy=avg_entropy,
+                approx_kl=avg_kl,
+                ratio=avg_ratio,
+                clip_frac=avg_clip_frac,
+            )
+
+    bar.close()
 
     print("\n[Train] Final eval ...")
     final_metrics = _eval_model(
