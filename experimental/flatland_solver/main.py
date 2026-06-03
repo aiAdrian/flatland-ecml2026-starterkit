@@ -544,7 +544,7 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Target KL for legacy-style early-stop guard")
     parser.add_argument("--mappo-kl-stop-factor", type=float, default=1.5,
                         help="Early-stop threshold factor applied to target KL")
-    parser.add_argument("--mappo-done-window", type=int, default=50,
+    parser.add_argument("--mappo-done-window", type=int, default=20,
                         help="Rolling window size for done-rate metric in MAPPO train logs")
     parser.add_argument("--mappo-mid-eval-every", type=int, default=0,
                         help="Run MAPPO mid-training eval every N collected episodes (0 disables)")

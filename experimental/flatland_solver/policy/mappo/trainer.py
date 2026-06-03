@@ -362,10 +362,7 @@ def _ppo_update(
     with torch.no_grad():
         head_snapshot = [p.detach().clone() for p in head.parameters()]
 
-    for _ in range(max(1, int(ppo_epochs))):
-        # ---------------------------------------------------
-        print("PPO Update Epoch: " , epoch+1, "/", total_epochs)
-        # ---------------------------------------------------
+    for k_epoch in range(max(1, int(ppo_epochs))):
         idx = np.random.permutation(n)
         epoch_early_stop = False
 
@@ -439,6 +436,18 @@ def _ppo_update(
             stats["ratio"].append(float(ratio.mean().item()))
             stats["clip_frac"].append(clip_frac)
             stats["early_stop_skips"].append(0.0)
+
+        # ---------------------------------------------------
+        print(
+            "PPO Update - K-Epoch: "
+            f"{(k_epoch+1):5.2f} / {max(1, int(ppo_epochs)):5.2f}\t",
+            end=""
+        )
+        for k, v in stats.items():
+            print(f"\t{k:15s} {v[-1]:8.3f}", end="")
+
+        print("")
+        # ---------------------------------------------------
 
         if epoch_early_stop:
             continue
@@ -838,7 +847,9 @@ def train_mappo(args, checkpoint_path: Path, tb_logger=None) -> Path:
             )
             if cur_eps > 0.0:
                 metrics["eps"] = cur_eps
-            print(format_episode_compact("TRAIN", episode=ep, total=args.episodes, **metrics))
+            
+            if False: # DEBUG -> TRAIN OUTPUT
+                print(format_episode_compact("TRAIN", episode=ep, total=args.episodes, **metrics))
 
             if tb_logger is not None:
                 ep_idx = ep

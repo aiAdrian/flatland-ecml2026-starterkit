@@ -169,7 +169,7 @@ def format_episode_compact(
       [EVAL]  ep=10/20   done=100% dlk=0% rew=+8.5
       [BC]    ep=5/10    loss=0.123 acc=85%
       [REC]   ep=50/200  samples=156 done=60% dlk=20%
-    """
+    """ 
     pct = 100.0 * float(episode) / max(1, int(total))
     prefix = f"[{kind:<6}] ep={episode:>4}/{total:<4} ({pct:>5.1f}%)"
     
